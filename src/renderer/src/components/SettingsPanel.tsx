@@ -55,44 +55,41 @@ export function SettingsPanel({ settings, workspace, onChanged }: Props) {
 
       <div className="panel">
         <div className="panel-title">
-          <strong>1. 工作区</strong>
-          <span className="muted">所有 Agent 共享的项目仓库</span>
+          <strong>1. 当前项目</strong>
+          <span className="muted">新建、切换和移除项目在左边的“项目”里</span>
         </div>
         <div className="kv">
+          <span>项目</span>
+          <span>{settings.projects.find((p) => p.id === settings.currentProjectId)?.name ?? '还没有打开项目'}</span>
           <span>位置</span>
-          <span className="mono">{workspace.path ?? '还没有选择'}</span>
+          <span className="mono">{workspace.path ?? '—'}</span>
           <span>状态</span>
           <span>
             {!workspace.path
               ? '—'
               : !workspace.exists
                 ? '这个文件夹不存在了'
-                : workspace.initialized
-                  ? `已初始化，${workspace.agentCount} 个 Agent${workspace.isGitRepo ? '，Git 仓库' : '，还不是 Git 仓库'}`
-                  : '还没有初始化'}
+                : `${workspace.agentCount} 个 Agent${workspace.isGitRepo ? '，Git 仓库' : '，还不是 Git 仓库'}`}
           </span>
         </div>
         <div className="form-actions left">
-          <button className="btn" disabled={working} onClick={() => void run(async () => void (await window.nexus.settings.chooseWorkspace()))}>
-            选择文件夹…
-          </button>
           <button
-            className="btn primary"
+            className="btn"
             disabled={working || !workspace.path}
-            title="按模板建 CLAUDE.md、spec/、mech/、elec/、firmware/、paper/、handoff/ 和 .nexus/ 下的 Agent 配置；已有的文件不会被覆盖"
+            title="按机器人研发模板补上缺的文件：CLAUDE.md、spec/、mech/、elec/、firmware/、paper/、handoff/ 和五个 Agent 的配置；已有的文件不会被覆盖"
             onClick={() =>
               void run(async () => {
-                const result = await window.nexus.workspace.scaffold()
+                const result = await window.nexus.workspace.scaffold('robot')
                 return `新建了 ${result.created.length} 个文件，${result.skipped} 个已存在的文件保持不变。`
               })
             }
           >
-            {workspace.initialized ? '补齐模板文件' : '初始化工作区'}
+            补齐机器人研发模板
           </button>
           <button
             className="btn"
             disabled={working || !workspace.initialized}
-            title="把 Agent 配置导出成 .claude/agents/*.md，阶段 0 直接在 Claude Code 里试四个角色时用"
+            title="把 Agent 配置导出成 .claude/agents/*.md，想直接在 Claude Code 里试这些角色时用"
             onClick={() =>
               void run(async () => {
                 const result = await window.nexus.workspace.exportClaudeAgents()
@@ -156,7 +153,7 @@ export function SettingsPanel({ settings, workspace, onChanged }: Props) {
       <div className="panel">
         <div className="panel-title">
           <strong>3. 预算和轮数上限</strong>
-          <span className="muted">留空表示不限；每个 Agent 的配置里可以单独覆盖</span>
+          <span className="muted">对所有项目生效；留空表示不限，每个 Agent 的配置里可以单独覆盖</span>
         </div>
         <div className="form-row three">
           <label>
@@ -179,6 +176,14 @@ export function SettingsPanel({ settings, workspace, onChanged }: Props) {
             onChange={(e) => void run(async () => void (await window.nexus.settings.update({ autoCommit: e.target.checked })))}
           />
           <span>每个任务结束自动提交一次 Git（提交信息以 [agent id] 开头，可以按 Agent 回滚）</span>
+        </label>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={settings.notifications}
+            onChange={(e) => void run(async () => void (await window.nexus.settings.update({ notifications: e.target.checked })))}
+          />
+          <span>窗口不在前台时，需要审批或任务结束就发系统通知</span>
         </label>
         <div className="form-actions left">
           <button
@@ -203,7 +208,7 @@ export function SettingsPanel({ settings, workspace, onChanged }: Props) {
       <div className="panel">
         <div className="panel-title">
           <strong>4. Overleaf（可选）</strong>
-          <span className="muted">把 paper/ 关联到 Overleaf 项目的 Git 仓库</span>
+          <span className="muted">把当前项目的 paper/ 关联到 Overleaf 项目的 Git 仓库</span>
         </div>
         <p className="muted small">
           Overleaf 的程序化入口是它的 Git 集成（付费功能）：在 Overleaf 项目菜单的 Git 里可以看到地址。
@@ -238,13 +243,13 @@ export function SettingsPanel({ settings, workspace, onChanged }: Props) {
             <strong>Fusion：</strong>在“偏好设置 &gt; 常规 &gt; API”里启用 MCP 服务（地址 <code>http://127.0.0.1:27182/mcp</code>）。
           </li>
           <li>
-            <strong>嘉立创EDA专业版：</strong>安装 Run API Gateway 扩展并允许外部交互，装好 EasyEDA API Skill。
+            <strong>嘉立创EDA专业版：</strong>安装 Run API Gateway 扩展并允许外部交互。EasyEDA API Skill 和桥接服务已经内置，不用另装。
           </li>
           <li>
             <strong>PlatformIO：</strong>确认命令行里能运行 <code>pio --version</code>。
           </li>
           <li>
-            <strong>工作区：</strong>初始化后，把 <code>CLAUDE.md</code> 和 <code>spec/interfaces.md</code> 里的占位内容换成你的项目。
+            <strong>项目：</strong>新建后，把 <code>CLAUDE.md</code> 和 <code>spec/interfaces.md</code> 里的占位内容换成你的项目。
           </li>
         </ul>
       </div>

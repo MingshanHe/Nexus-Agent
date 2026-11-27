@@ -207,11 +207,15 @@ export class Store {
       .run(workspace, agentId, sessionId)
   }
 
-  /** 从 since（毫秒时间戳）起的总花费。 */
-  costSince(workspace: string, since: number): number {
-    const row = this.db
-      .prepare('SELECT COALESCE(SUM(cost_usd), 0) AS total FROM tasks WHERE workspace = ? AND started_at >= ?')
-      .get(workspace, since) as Row
+  /** 从 since（毫秒时间戳）起的总花费；workspace 传 null 表示所有项目合计。 */
+  costSince(workspace: string | null, since: number): number {
+    const row = (
+      workspace === null
+        ? this.db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS total FROM tasks WHERE started_at >= ?').get(since)
+        : this.db
+            .prepare('SELECT COALESCE(SUM(cost_usd), 0) AS total FROM tasks WHERE workspace = ? AND started_at >= ?')
+            .get(workspace, since)
+    ) as Row
     return Number(row.total ?? 0)
   }
 
@@ -241,6 +245,7 @@ export class Store {
     return {
       totalUsd: Number(totals.total ?? 0),
       taskCount: Number(totals.n ?? 0),
+      allProjectsMonthUsd: this.costSince(null, monthStart),
       monthUsd: this.costSince(workspace, monthStart),
       todayUsd: this.costSince(workspace, dayStart),
       byAgent: byAgent.map((row) => ({

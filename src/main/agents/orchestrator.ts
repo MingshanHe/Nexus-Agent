@@ -4,7 +4,7 @@ import { listHandoffs } from '../handoff/handoffs'
 import { listAgents } from './config'
 import type { AgentManager } from './manager'
 
-// 总控 Agent 的自定义工具。它自己只读，靠 dispatch(agent, task) 把目标拆给各专业 Agent。
+// 总控 Agent 的自定义工具，绑定在它所在的项目上。它自己只读，靠 dispatch(agent, task) 把目标拆给各专业 Agent。
 // dispatch 不在总控的自动放行名单里，所以每次派发都会先弹审批。
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000
@@ -15,8 +15,8 @@ function text(value: string, isError = false) {
 
 export function createOrchestratorServer(
   manager: AgentManager,
+  workspace: string,
   orchestratorId: string,
-  getWorkspace: () => string | null,
 ): McpServerConfig {
   return createSdkMcpServer({
     name: 'nexus',
@@ -30,9 +30,7 @@ export function createOrchestratorServer(
         '列出当前工作区里的专业 Agent：id、名称、职责、是否空闲。派发任务前先看这个。',
         {},
         async () => {
-          const workspace = getWorkspace()
-          if (!workspace) return text('还没有选择工作区。', true)
-          const states = new Map(manager.states().map((s) => [s.agentId, s]))
+          const states = new Map(manager.states(workspace).map((s) => [s.agentId, s]))
           const rows = listAgents(workspace)
             .filter((a) => !a.error && a.config.id !== orchestratorId && a.config.role !== 'orchestrator')
             .map((a) => ({
@@ -50,8 +48,6 @@ export function createOrchestratorServer(
         '列出 handoff/ 目录里的交接单及其状态（open / acknowledged / done），用来跟踪跨专业的跟进。',
         {},
         async () => {
-          const workspace = getWorkspace()
-          if (!workspace) return text('还没有选择工作区。', true)
           const rows = listHandoffs(workspace).map((h) => ({
             file: `handoff/${h.file}`,
             title: h.title,
@@ -73,12 +69,11 @@ export function createOrchestratorServer(
         },
         async ({ agent, task }) => {
           if (agent === orchestratorId) return text('不能把任务派给自己。', true)
-          const workspace = getWorkspace()
-          const target = workspace ? listAgents(workspace).find((a) => a.config.id === agent) : undefined
+          const target = listAgents(workspace).find((a) => a.config.id === agent)
           if (!target || target.error) return text(`找不到可用的 Agent：${agent}。先调用 list_agents。`, true)
           if (target.config.role === 'orchestrator') return text('不能把任务派给另一个总控 Agent。', true)
           try {
-            const record = await manager.submitAndWait(agent, task, 'orchestrator')
+            const record = await manager.submitAndWait(workspace, agent, task, 'orchestrator')
             const summary = {
               agent,
               status: record.status,

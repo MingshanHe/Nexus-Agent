@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
-import type { AgentDetail, AgentRuntimeState, ChatItem, McpStatus, SessionInfo } from '../../../shared/types'
+import type { AgentDetail, AgentRuntimeState, BridgeStatus, ChatItem, McpStatus, SessionInfo } from '../../../shared/types'
 import {
   AGENT_STATUS_LABEL,
   dateTime,
@@ -275,6 +275,33 @@ export function ChatView({ detail, runtime, items, taskVersion, hasApiKey, onEdi
 
   const mcp: McpStatus[] = runtime?.mcp.length ? runtime.mcp : (probe ?? [])
 
+  // 用到内置 EasyEDA 技能的 Agent：显示桥接服务和嘉立创EDA 窗口的连接情况
+  const usesEda = Array.isArray(config.skills) && config.skills.includes('easyeda-api')
+  const [eda, setEda] = useState<BridgeStatus | null>(null)
+  useEffect(() => {
+    if (!usesEda) return
+    let cancelled = false
+    const refresh = (): void => {
+      void window.nexus.eda.status().then((next) => {
+        if (!cancelled) setEda(next)
+      })
+    }
+    refresh()
+    const timer = setInterval(refresh, 5000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [usesEda])
+
+  const edaAction = async (work: () => Promise<BridgeStatus>): Promise<void> => {
+    try {
+      setEda(await work())
+    } catch (e) {
+      setNotice(errorText(e))
+    }
+  }
+
   const send = async (): Promise<void> => {
     const text = draft.trim()
     if (!text) return
@@ -340,6 +367,40 @@ export function ChatView({ detail, runtime, items, taskVersion, hasApiKey, onEdi
         </div>
       </header>
       {config.description && <div className="chat-desc">{config.description}</div>}
+      {usesEda && eda && (
+        <div className="eda-bar">
+          <span className={`pill ${eda.running ? (eda.windows > 0 ? 'mcp-connected' : 'eda-waiting') : 'mcp-failed'}`}>
+            <i className="dot" />
+            {eda.running
+              ? eda.windows > 0
+                ? `已连接 ${eda.windows} 个嘉立创EDA 窗口`
+                : '桥接服务已启动，等待嘉立创EDA 连接'
+              : '桥接服务未启动'}
+          </span>
+          {eda.running && <span className="muted">端口 {eda.port}</span>}
+          <span className="muted">
+            内置技能 {eda.skillVersion ?? '缺失'}
+            {eda.installed ? '（已装进项目）' : '（任务启动时自动安装）'}
+          </span>
+          {eda.error && !eda.running && <span className="muted">{eda.error}</span>}
+          <span className="spacer" />
+          {!eda.running && (
+            <button className="btn small" onClick={() => void edaAction(() => window.nexus.eda.startBridge())}>
+              启动桥接服务
+            </button>
+          )}
+          {eda.running && eda.managed && (
+            <button className="btn small" disabled={busy} onClick={() => void edaAction(() => window.nexus.eda.stopBridge())}>
+              停止
+            </button>
+          )}
+          {!eda.installed && (
+            <button className="btn small" onClick={() => void edaAction(() => window.nexus.eda.installSkill())}>
+              现在安装技能
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="chat-body">
         <div

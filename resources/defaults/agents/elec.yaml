@@ -1,4 +1,4 @@
-# 电子 Agent：通过嘉立创官方的 Run API Gateway 扩展 + 本机 Bridge + EasyEDA API Skill 操作嘉立创EDA专业版
+# 电子 Agent：通过嘉立创官方的 Run API Gateway 扩展 + 本机桥接服务 + EasyEDA API Skill 操作嘉立创EDA专业版
 name: 电子 Agent
 description: 查库选型、原理图连线、网络表检查、布局布线辅助、导出 BOM（嘉立创EDA专业版）
 model: claude-opus-5-5
@@ -7,12 +7,11 @@ system_prompt: prompts/elec.md
 # 嘉立创EDA 一次只跑一个任务
 resource: easyeda
 
-# EasyEDA API Skill 通常装在用户目录（~/.claude/skills/easyeda-api），所以这个 Agent 也读用户级设置。
-# 如果你把技能装进了工作区的 .claude/skills/，可以改回 [project]
-setting_sources: [user, project]
+# EasyEDA API Skill 随应用内置：任务启动前自动装进项目的 .claude/skills/easyeda-api/，
+# 桥接服务也由应用拉起，不需要另外安装。
 skills: [easyeda-api]
 
-# 写原理图和 PCB 的脚本都经命令行发给 Bridge 执行，而命令行不在放行名单里，
+# 写原理图和 PCB 的脚本都经命令行发给桥接服务执行，而命令行不在放行名单里，
 # 所以初期每一次写入都会弹审批。
 allowed_tools:
   - Read

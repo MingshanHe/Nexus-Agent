@@ -8,6 +8,10 @@ interface Props {
   detail: AgentDetail
   isNew: boolean
   existingIds: string[]
+  /** 自带的 Agent 模板；只在新建时用 */
+  templates: AgentDetail[]
+  templateId: string
+  onPickTemplate(id: string): void
   onClose(): void
   onSaved(id: string): void
 }
@@ -59,7 +63,7 @@ function positive(text: string): number | undefined {
   return text.trim() !== '' && Number.isFinite(value) && value > 0 ? value : undefined
 }
 
-export function AgentEditor({ detail, isNew, existingIds, onClose, onSaved }: Props) {
+export function AgentEditor({ detail, isNew, existingIds, templates, templateId, onPickTemplate, onClose, onSaved }: Props) {
   const { config } = detail
   const [id, setId] = useState(config.id)
   const [name, setName] = useState(config.name)
@@ -184,6 +188,20 @@ export function AgentEditor({ detail, isNew, existingIds, onClose, onSaved }: Pr
 
         <div className="dialog-body editor-grid">
           {error && <div className="note note-error span2">{error}</div>}
+
+          {isNew && (
+            <label className="span2">
+              <span className="field-label">从模板开始（会重新填好下面所有内容，之后都可以改）</span>
+              <select className="input" value={templateId} onChange={(e) => onPickTemplate(e.target.value)}>
+                <option value="">空白</option>
+                {templates.map((t) => (
+                  <option key={t.config.id} value={t.config.id}>
+                    {t.config.name}：{t.config.description ?? ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
 
           <label>
             <span className="field-label">id（文件名，用于提交信息和交接单）</span>

@@ -22,7 +22,8 @@ import {
 } from '../src/main/handoff/handoffs'
 import { SettingsStore } from '../src/main/settings'
 import { Store, taskCostFromReported } from '../src/main/store/db'
-import { exportClaudeAgents, scaffoldWorkspace } from '../src/main/workspace/scaffold'
+import { EdaBridge, installedSkillDir, installSkill, skillVersion, usesEasyedaSkill } from '../src/main/eda/easyeda'
+import { agentTemplates, exportClaudeAgents, scaffoldWorkspace } from '../src/main/workspace/scaffold'
 import type { TaskRecord } from '../src/shared/types'
 
 const DEFAULTS = path.resolve('resources/defaults')
@@ -133,6 +134,44 @@ describe('Agent 配置文件', () => {
     expect(listAgents(tmp).map((a) => a.config.id)).toEqual(['mech'])
     expect(fs.existsSync(path.join(tmp, '.nexus/prompts/mech-2.md'))).toBe(false)
     expect(fs.existsSync(path.join(tmp, '.nexus/prompts/mech.md'))).toBe(true)
+  })
+
+  it('配置窗口交出来的对象（空字段是 undefined）能保存，再读回来内容一致', () => {
+    const fromEditor = {
+      id: 'mech',
+      name: '机械 Agent',
+      description: undefined,
+      role: undefined,
+      model: 'claude-opus-5-5',
+      effort: undefined,
+      cwd: undefined,
+      system_prompt: 'prompts/mech.md',
+      mcp_servers: { fusion: { type: 'http' as const, url: 'http://127.0.0.1:27182/mcp', headers: undefined } },
+      allowed_tools: ['Read', 'Edit(/mech/**)'],
+      always_ask: ['mcp__fusion__fusion_mcp_update'],
+      disallowed_tools: [],
+      skills: undefined,
+      setting_sources: undefined,
+      resource: 'fusion',
+      max_turns: undefined,
+      max_budget_usd: 2.5,
+      git: { paths: ['mech', 'handoff'], repo: undefined },
+    }
+    saveAgent(tmp, fromEditor, '# 机械')
+    const [loaded] = listAgents(tmp)
+    expect(loaded.error).toBeUndefined()
+    expect(loaded.config).toEqual({
+      id: 'mech',
+      name: '机械 Agent',
+      model: 'claude-opus-5-5',
+      system_prompt: 'prompts/mech.md',
+      mcp_servers: { fusion: { type: 'http', url: 'http://127.0.0.1:27182/mcp' } },
+      allowed_tools: ['Read', 'Edit(/mech/**)'],
+      always_ask: ['mcp__fusion__fusion_mcp_update'],
+      resource: 'fusion',
+      max_budget_usd: 2.5,
+      git: { paths: ['mech', 'handoff'] },
+    })
   })
 
   it('坏掉的配置文件不影响其他 Agent', () => {
@@ -375,4 +414,136 @@ describe('历史会话转换', () => {
     expect(items.map((i) => i.kind)).toEqual(['user', 'assistant', 'tool'])
     expect(items[2]).toMatchObject({ kind: 'tool', name: 'Read', status: 'done', result: '内容' })
   })
+})
+
+describe('项目', () => {
+  const box = () => ({
+    available: async () => true,
+    encrypt: async (plain: string) => Buffer.from(plain).toString('base64'),
+    decrypt: async (cipher: string) => Buffer.from(cipher, 'base64').toString(),
+  })
+
+  it('新建、切换、重命名、移除；同一个文件夹不会加两次', () => {
+    const file = path.join(tmp, 'settings.json')
+    const settings = new SettingsStore(file, box(), '0.2.0')
+    expect(settings.workspace).toBeNull()
+    const a = settings.addProject({ name: '扑翼机', path: path.join(tmp, 'a') })
+    const b = settings.addProject({ name: '', path: path.join(tmp, 'b') })
+    expect(b.name).toBe('b')
+    expect(settings.workspace).toBe(b.path)
+    expect(settings.addProject({ name: '扑翼机 v2', path: path.join(tmp, 'A') }).id).toBe(
+      process.platform === 'win32' ? a.id : settings.projects[2].id,
+    )
+    settings.openProject(a.id)
+    settings.renameProject(a.id, '扑翼机 v3')
+    settings.setOverleafUrl(a.id, 'https://git.overleaf.com/abc')
+    expect(() => settings.renameProject(a.id, '  ')).toThrow()
+    expect(() => settings.openProject('nope')).toThrow()
+
+    const reloaded = new SettingsStore(file, box(), '0.2.0')
+    expect(reloaded.view()).toMatchObject({ currentProjectId: a.id, workspace: a.path, overleafGitUrl: 'https://git.overleaf.com/abc', appVersion: '0.2.0', notifications: true })
+    expect(reloaded.currentProject?.name).toBe('扑翼机 v3')
+    reloaded.removeProject(a.id)
+    expect(reloaded.currentProject?.id).toBe(b.id)
+    expect(reloaded.view().overleafGitUrl).toBeNull()
+    // 移出列表不动磁盘
+    expect(reloaded.projectByPath(a.path)).toBeNull()
+  })
+
+  it('从 0.1.0 升级：原来的工作区变成第一个项目', () => {
+    const file = path.join(tmp, 'settings.json')
+    const old = path.join(tmp, 'robot-project')
+    fs.writeFileSync(file, JSON.stringify({ workspace: old, overleafGitUrl: 'https://git.overleaf.com/x', monthlyBudgetUsd: 30, autoCommit: false }))
+    const settings = new SettingsStore(file, box())
+    expect(settings.projects).toHaveLength(1)
+    expect(settings.view()).toMatchObject({ workspace: old, monthlyBudgetUsd: 30, autoCommit: false, overleafGitUrl: 'https://git.overleaf.com/x' })
+    expect(settings.currentProject?.name).toBe('robot-project')
+  })
+
+  it('空白模板只建项目总览和交接单目录；Agent 模板可以单独取用', async () => {
+    const result = await scaffoldWorkspace(tmp, DEFAULTS, 'blank')
+    expect(result.created).toEqual(expect.arrayContaining(['CLAUDE.md', '.gitignore', 'handoff/README.md', 'handoff/_template.md']))
+    expect(fs.existsSync(path.join(tmp, 'mech'))).toBe(false)
+    expect(listAgents(tmp)).toEqual([])
+    expect(listHandoffs(tmp)).toEqual([])
+
+    const templates = agentTemplates(DEFAULTS)
+    expect(templates.map((t) => t.config.id).sort()).toEqual(['elec', 'firmware', 'mech', 'orchestrator', 'paper'])
+    const paper = templates.find((t) => t.config.id === 'paper')
+    expect(paper?.prompt).toContain('只引用')
+    // 从模板加一个 Agent 到空白项目
+    saveAgent(tmp, { ...(paper?.config ?? { id: 'paper', name: '', model: '' }), id: 'writer', system_prompt: undefined }, paper?.prompt ?? '')
+    expect(listAgents(tmp).map((a) => a.config.id)).toEqual(['writer'])
+    expect(fs.existsSync(path.join(tmp, '.nexus/prompts/writer.md'))).toBe(true)
+  })
+})
+
+describe('内置的 EasyEDA API Skill', () => {
+  const VENDORED = path.resolve('vendor/easyeda-api-skill')
+
+  it('随仓库带着技能本体，电子 Agent 默认用它而且只读项目级设置', () => {
+    expect(skillVersion(VENDORED)).toMatch(/^\d+\.\d+\.\d+$/)
+    expect(fs.existsSync(path.join(VENDORED, 'scripts/bridge-server.mjs'))).toBe(true)
+    const source = JSON.parse(fs.readFileSync(path.resolve('vendor/easyeda-api-skill.source.json'), 'utf8'))
+    expect(source.version).toBe(skillVersion(VENDORED))
+    const elec = agentTemplates(DEFAULTS).find((t) => t.config.id === 'elec')?.config
+    expect(elec && usesEasyedaSkill(elec)).toBe(true)
+    expect(elec?.setting_sources).toBeUndefined()
+    expect(usesEasyedaSkill({ skills: 'all' })).toBe(false)
+    expect(usesEasyedaSkill({})).toBe(false)
+  })
+
+  it('装进项目：带上桥接脚本的依赖，加进 .gitignore；同版本不重复复制，版本变了整个替换', () => {
+    const bundled = path.join(tmp, 'bundled')
+    fs.mkdirSync(path.join(bundled, 'scripts'), { recursive: true })
+    fs.writeFileSync(path.join(bundled, 'SKILL.md'), '---\nname: easyeda-api\n---\n')
+    fs.writeFileSync(path.join(bundled, 'package.json'), JSON.stringify({ version: '1.0.0' }))
+    fs.writeFileSync(path.join(bundled, 'scripts/bridge-server.mjs'), '// v1')
+    const wsDir = path.join(tmp, 'ws')
+    fs.mkdirSync(wsDir)
+    fs.writeFileSync(path.join(wsDir, 'package.json'), '{}')
+    const project = path.join(tmp, 'project')
+    fs.mkdirSync(project)
+    fs.writeFileSync(path.join(project, '.gitignore'), 'firmware/.pio/')
+
+    expect(installSkill(project, bundled, wsDir)).toEqual({ changed: true, version: '1.0.0' })
+    const installed = installedSkillDir(project)
+    expect(skillVersion(installed)).toBe('1.0.0')
+    expect(fs.existsSync(path.join(installed, 'node_modules/ws/package.json'))).toBe(true)
+    expect(fs.readFileSync(path.join(project, '.gitignore'), 'utf8')).toBe(
+      'firmware/.pio/\n# Nexus Agent 内置的技能，由应用安装和更新\n/.claude/skills/easyeda-api/\n',
+    )
+
+    fs.writeFileSync(path.join(installed, 'local-note.txt'), 'x')
+    expect(installSkill(project, bundled, wsDir).changed).toBe(false)
+    expect(fs.existsSync(path.join(installed, 'local-note.txt'))).toBe(true)
+
+    fs.writeFileSync(path.join(bundled, 'package.json'), JSON.stringify({ version: '1.1.0' }))
+    expect(installSkill(project, bundled, wsDir)).toEqual({ changed: true, version: '1.1.0' })
+    expect(fs.existsSync(path.join(installed, 'local-note.txt'))).toBe(false)
+    expect(fs.readFileSync(path.join(project, '.gitignore'), 'utf8').match(/easyeda-api/g)).toHaveLength(1)
+    expect(() => installSkill(project, null)).toThrow()
+    expect(() => installSkill(project, path.join(tmp, 'missing'))).toThrow()
+  })
+
+  it('桥接服务：没有在跑就用内置脚本拉起，停掉后不再占着端口', async () => {
+    const bridge = new EdaBridge({ skillDir: () => VENDORED, execPath: process.execPath })
+    const before = await bridge.probe()
+    const status = await bridge.ensureRunning()
+    expect(status.running).toBe(true)
+    expect(status.port).toBeGreaterThanOrEqual(49620)
+    expect(status.port).toBeLessThanOrEqual(49629)
+    expect(status.windows).toBeGreaterThanOrEqual(0)
+    // 这台机器上本来就有桥接服务在跑时，我们只是复用它，不去动它
+    expect(status.managed).toBe(!before.running)
+    expect((await bridge.ensureRunning()).port).toBe(status.port)
+    bridge.stop()
+    if (!before.running) {
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      expect((await bridge.probe()).running).toBe(false)
+    }
+
+    const broken = new EdaBridge({ skillDir: () => null, execPath: process.execPath })
+    if (!before.running) expect((await broken.ensureRunning()).error).toContain('没有找到')
+  }, 30_000)
 })

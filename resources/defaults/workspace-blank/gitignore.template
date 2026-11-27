@@ -1,0 +1,24 @@
+# 系统和编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+
+# PlatformIO
+firmware/.pio/
+
+# LaTeX 中间文件
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+*.out
+paper/**/*.log
+
+# Claude Code 的本机设置
+.claude/settings.local.json
+
+# Nexus Agent 内置的技能，由应用安装和更新
+/.claude/skills/easyeda-api/

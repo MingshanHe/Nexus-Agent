@@ -66,6 +66,8 @@ export interface McpStatus {
 }
 
 export interface AgentRuntimeState {
+  /** 项目文件夹 */
+  workspace: string
   agentId: string
   status: AgentStatus
   currentTaskId: string | null
@@ -138,6 +140,8 @@ export interface Question {
 
 export interface ApprovalRequest {
   id: string
+  /** 发起审批的 Agent 所在的项目文件夹 */
+  workspace: string
   agentId: string
   agentName: string
   taskId: string
@@ -193,6 +197,8 @@ export interface SessionInfo {
 
 export interface CostSummary {
   totalUsd: number
+  /** 所有项目本月合计：每月预算上限按这个数算 */
+  allProjectsMonthUsd: number
   monthUsd: number
   todayUsd: number
   taskCount: number
@@ -201,8 +207,55 @@ export interface CostSummary {
   recent: TaskRecord[]
 }
 
+/** 一个项目 = 一个文件夹（共享仓库）+ 它自己的一组 Agent */
+export interface ProjectInfo {
+  id: string
+  name: string
+  path: string
+  createdAt: number
+  overleafGitUrl: string | null
+}
+
+export interface ProjectSummary extends ProjectInfo {
+  exists: boolean
+  agentCount: number
+  /** 正在运行或排队的任务数 */
+  activeTasks: number
+  current: boolean
+}
+
+export interface FolderChoice {
+  path: string
+  /** 文件夹名，作为项目名的默认值 */
+  name: string
+  /** 这个文件夹里已经有 Agent 配置：会直接作为已有项目打开，不套模板 */
+  hasAgents: boolean
+}
+
+/** 新建项目时用的模板 */
+export type ProjectTemplate = 'robot' | 'blank'
+
+export interface BridgeStatus {
+  /** 本机有没有嘉立创EDA 的桥接服务在跑 */
+  running: boolean
+  port: number | null
+  /** 是不是本应用启动的 */
+  managed: boolean
+  /** 已连接的嘉立创EDA 窗口数 */
+  windows: number
+  /** 内置技能的版本 */
+  skillVersion: string | null
+  /** 当前项目里是否已装好技能 */
+  installed: boolean
+  error?: string
+}
+
 export interface AppSettings {
+  /** 当前项目的文件夹；没有项目时为 null */
   workspace: string | null
+  currentProjectId: string | null
+  projects: ProjectInfo[]
+  appVersion: string
   hasApiKey: boolean
   /** 'app' = 保存在本应用里；'env' = 来自环境变量 ANTHROPIC_API_KEY */
   apiKeySource: 'app' | 'env' | 'none'
@@ -213,14 +266,14 @@ export interface AppSettings {
   /** 每月预算上限（美元）；达到后不再启动新任务。null 表示不限 */
   monthlyBudgetUsd: number | null
   autoCommit: boolean
+  /** 当前项目关联的 Overleaf Git 地址 */
   overleafGitUrl: string | null
+  /** 需要审批或任务结束时，窗口不在前台就发系统通知 */
+  notifications: boolean
 }
 
 export type SettingsPatch = Partial<
-  Pick<
-    AppSettings,
-    'defaultMaxBudgetUsd' | 'defaultMaxTurns' | 'monthlyBudgetUsd' | 'autoCommit' | 'overleafGitUrl'
-  >
+  Pick<AppSettings, 'defaultMaxBudgetUsd' | 'defaultMaxTurns' | 'monthlyBudgetUsd' | 'autoCommit' | 'notifications'>
 >
 
 export interface WorkspaceStatus {
@@ -241,9 +294,9 @@ export type AppEvent =
   | { type: 'settings-changed' }
   | { type: 'agent-state'; state: AgentRuntimeState }
   | { type: 'task-updated'; task: TaskRecord }
-  | { type: 'chat'; agentId: string; item: ChatItem }
-  | { type: 'chat-delta'; agentId: string; itemId: string; text: string }
-  | { type: 'chat-reset'; agentId: string }
+  | { type: 'chat'; workspace: string; agentId: string; item: ChatItem }
+  | { type: 'chat-delta'; workspace: string; agentId: string; itemId: string; text: string }
+  | { type: 'chat-reset'; workspace: string; agentId: string }
   | { type: 'approval-request'; request: ApprovalRequest }
   | { type: 'approval-resolved'; id: string }
   | { type: 'handoffs-changed'; handoffs: Handoff[] }
@@ -261,18 +314,31 @@ export interface NexusApi {
   settings: {
     get(): Promise<AppSettings>
     update(patch: SettingsPatch): Promise<AppSettings>
-    chooseWorkspace(): Promise<AppSettings>
     setApiKey(key: string): Promise<AppSettings>
     clearApiKey(): Promise<AppSettings>
   }
+  projects: {
+    list(): Promise<ProjectSummary[]>
+    /** 弹出系统的文件夹选择框；取消时返回 null */
+    chooseFolder(): Promise<FolderChoice | null>
+    /** 新建项目，或把已有文件夹加进来；创建后切换过去 */
+    create(input: { name: string; path: string; template: ProjectTemplate }): Promise<AppSettings>
+    open(id: string): Promise<AppSettings>
+    rename(id: string, name: string): Promise<AppSettings>
+    /** 只从列表里移除，不删除磁盘上的文件 */
+    remove(id: string): Promise<AppSettings>
+    reveal(id: string): Promise<void>
+  }
   workspace: {
     status(): Promise<WorkspaceStatus>
-    scaffold(): Promise<{ created: string[]; skipped: number }>
+    scaffold(template: ProjectTemplate): Promise<{ created: string[]; skipped: number }>
     exportClaudeAgents(): Promise<{ written: string[] }>
     openInExplorer(): Promise<void>
   }
   agents: {
     list(): Promise<AgentDetail[]>
+    /** 自带的 Agent 模板（机械、电子、嵌入式、论文、总控） */
+    templates(): Promise<AgentDetail[]>
     save(detail: { config: AgentConfig; prompt: string }): Promise<AgentDetail>
     remove(id: string): Promise<void>
     duplicate(id: string, newId: string): Promise<AgentDetail>
@@ -302,6 +368,13 @@ export interface NexusApi {
   costs: {
     summary(): Promise<CostSummary>
   }
+  eda: {
+    status(): Promise<BridgeStatus>
+    startBridge(): Promise<BridgeStatus>
+    stopBridge(): Promise<BridgeStatus>
+    /** 把内置的 EasyEDA API Skill 装进（或更新到）当前项目 */
+    installSkill(): Promise<BridgeStatus>
+  }
   overleaf: {
     link(url: string): Promise<GitResult>
     pull(): Promise<GitResult>
@@ -312,14 +385,16 @@ export interface NexusApi {
 
 /** window.nexus 上每个分组的方法名；预加载脚本按它生成转发函数，主进程按它注册处理函数。 */
 export const API_METHODS = {
-  settings: ['get', 'update', 'chooseWorkspace', 'setApiKey', 'clearApiKey'],
+  settings: ['get', 'update', 'setApiKey', 'clearApiKey'],
+  projects: ['list', 'chooseFolder', 'create', 'open', 'rename', 'remove', 'reveal'],
   workspace: ['status', 'scaffold', 'exportClaudeAgents', 'openInExplorer'],
-  agents: ['list', 'save', 'remove', 'duplicate', 'states', 'probeMcp'],
+  agents: ['list', 'templates', 'save', 'remove', 'duplicate', 'states', 'probeMcp'],
   tasks: ['start', 'interrupt', 'transcript', 'newSession'],
   sessions: ['list', 'resume'],
   approvals: ['pending', 'resolve'],
   handoffs: ['list', 'dispatch', 'setStatus', 'create'],
   costs: ['summary'],
+  eda: ['status', 'startBridge', 'stopBridge', 'installSkill'],
   overleaf: ['link', 'pull', 'push'],
 } as const satisfies { [G in Exclude<keyof NexusApi, 'onEvent'>]: ReadonlyArray<keyof NexusApi[G]> }
 

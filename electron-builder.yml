@@ -14,10 +14,19 @@ files:
 asarUnpack:
   - node_modules/@anthropic-ai/claude-agent-sdk-*/**
 
-# 默认的 Agent 配置、提示词和工作区模板
 extraResources:
+  # 默认的 Agent 配置、提示词和项目模板
   - from: resources/defaults
     to: defaults
+  # 内置的 EasyEDA API Skill（https://github.com/easyeda/easyeda-api-skill，MIT），
+  # 连同它的桥接脚本依赖的 ws 一起放在 asar 之外：桥接脚本要作为独立进程运行，技能要整个复制进项目
+  - from: vendor/easyeda-api-skill
+    to: skills/easyeda-api
+  - from: node_modules/ws
+    to: skills/easyeda-api/node_modules/ws
+    filter:
+      - '**/*'
+      - '!**/*.md'
 
 win:
   target:

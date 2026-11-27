@@ -72,7 +72,8 @@ export function CostPanel({ taskVersion, settings }: Props) {
   if (!summary) return <section className="page muted pad">读取中…</section>
 
   const budget = settings.monthlyBudgetUsd
-  const share = budget ? Math.min(1, summary.monthUsd / budget) : 0
+  // 每月上限管的是整个 API 账户，所以进度按所有项目的合计算
+  const share = budget ? Math.min(1, summary.allProjectsMonthUsd / budget) : 0
   const maxAgent = Math.max(...summary.byAgent.map((a) => a.costUsd), 0.01)
 
   return (
@@ -80,7 +81,9 @@ export function CostPanel({ taskVersion, settings }: Props) {
       <header className="page-head">
         <div>
           <h1>成本</h1>
-          <p className="muted">按量计费，和 Claude 订阅分开结算。这里是按 SDK 报告的用量估算的，以 Console 账单为准。</p>
+          <p className="muted">
+            当前项目的花费。按量计费，和 Claude 订阅分开结算；这里是按 SDK 报告的用量估算的，以 Console 账单为准。
+          </p>
         </div>
       </header>
 
@@ -98,11 +101,14 @@ export function CostPanel({ taskVersion, settings }: Props) {
                 <div className={`meter-fill${share >= 1 ? ' over' : share >= 0.8 ? ' near' : ''}`} style={{ width: `${share * 100}%` }} />
               </div>
               <div className="tile-sub muted">
-                预算 {usd(budget)}，已用 {Math.round(share * 100)}%{share >= 1 ? '：已达上限，新任务不会启动' : ''}
+                所有项目合计 {usd(summary.allProjectsMonthUsd)} / 预算 {usd(budget)}，已用 {Math.round(share * 100)}%
+                {share >= 1 ? '：已达上限，新任务不会启动' : ''}
               </div>
             </>
           )}
-          {budget === null && <div className="tile-sub muted">没有设每月上限</div>}
+          {budget === null && (
+            <div className="tile-sub muted">所有项目合计 {usd(summary.allProjectsMonthUsd)}，没有设每月上限</div>
+          )}
         </div>
         <div className="tile">
           <div className="tile-label">累计</div>

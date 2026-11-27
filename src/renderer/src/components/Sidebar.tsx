@@ -1,36 +1,59 @@
 import { AGENT_STATUS_LABEL, agentGlyph } from '../format'
-import type { UiState, View } from '../store'
+import { errorText, type UiState, type View } from '../store'
 
 interface Props {
   state: UiState
   onSelect(agentId: string): void
   onView(view: View): void
   onNewAgent(): void
+  onChanged(): Promise<void>
 }
 
-function baseName(dir: string): string {
-  return dir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || dir
-}
+const MANAGE = '__manage__'
 
-export function Sidebar({ state, onSelect, onView, onNewAgent }: Props) {
+export function Sidebar({ state, onSelect, onView, onNewAgent, onChanged }: Props) {
   const openHandoffs = state.handoffs.filter((h) => h.status === 'open').length
-  const workspace = state.settings?.workspace
+  const settings = state.settings
+  const projects = settings?.projects ?? []
+  const hasProject = Boolean(settings?.workspace)
+
+  const switchProject = async (value: string): Promise<void> => {
+    if (value === MANAGE) {
+      onView('projects')
+      return
+    }
+    try {
+      await window.nexus.projects.open(value)
+      await onChanged()
+    } catch (e) {
+      window.alert(errorText(e))
+    }
+  }
 
   return (
     <aside className="sidebar">
       <div className="brand">
         <span className="brand-mark" aria-hidden="true" />
-        <div>
-          <div className="brand-name">Nexus Agent</div>
-          <button
-            className="workspace"
-            title={workspace ? `${workspace}\n点击在资源管理器里打开` : '还没有选择工作区'}
-            onClick={() => (workspace ? void window.nexus.workspace.openInExplorer() : onView('settings'))}
-          >
-            {workspace ? baseName(workspace) : '未选择工作区'}
-          </button>
-        </div>
+        <div className="brand-name">Nexus Agent</div>
       </div>
+
+      <label className="side-label" htmlFor="project-select">
+        项目
+      </label>
+      <select
+        id="project-select"
+        className="project-select"
+        value={settings?.currentProjectId ?? MANAGE}
+        title={settings?.workspace ?? '还没有项目'}
+        onChange={(event) => void switchProject(event.target.value)}
+      >
+        {projects.map((project) => (
+          <option key={project.id} value={project.id}>
+            {project.name}
+          </option>
+        ))}
+        <option value={MANAGE}>{projects.length === 0 ? '新建项目…' : '管理项目…'}</option>
+      </select>
 
       <div className="side-label">Agent</div>
       <nav className="agent-list">
@@ -58,7 +81,7 @@ export function Sidebar({ state, onSelect, onView, onNewAgent }: Props) {
             </button>
           )
         })}
-        {workspace && (
+        {hasProject && (
           <button className="agent-row add" onClick={onNewAgent}>
             <span className="glyph add-glyph">＋</span>
             <span className="agent-text">
@@ -71,18 +94,23 @@ export function Sidebar({ state, onSelect, onView, onNewAgent }: Props) {
       <div className="side-spacer" />
 
       <nav className="side-nav">
-        <button className={state.view === 'handoffs' ? 'active' : ''} onClick={() => onView('handoffs')}>
+        <button className={state.view === 'handoffs' ? 'active' : ''} disabled={!hasProject} onClick={() => onView('handoffs')}>
           交接看板
           {openHandoffs > 0 && <span className="badge">{openHandoffs}</span>}
         </button>
-        <button className={state.view === 'costs' ? 'active' : ''} onClick={() => onView('costs')}>
+        <button className={state.view === 'costs' ? 'active' : ''} disabled={!hasProject} onClick={() => onView('costs')}>
           成本
+        </button>
+        <button className={state.view === 'projects' ? 'active' : ''} onClick={() => onView('projects')}>
+          项目
+          {projects.length > 1 && <span className="count">{projects.length}</span>}
         </button>
         <button className={state.view === 'settings' ? 'active' : ''} onClick={() => onView('settings')}>
           设置
-          {state.settings && !state.settings.hasApiKey && <span className="badge warn">需配置</span>}
+          {settings && !settings.hasApiKey && <span className="badge warn">需配置</span>}
         </button>
       </nav>
+      {settings && <div className="version muted">v{settings.appVersion}</div>}
     </aside>
   )
 }

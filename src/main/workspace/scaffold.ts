@@ -1,8 +1,8 @@
 import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
-import type { AgentConfig, GitResult, McpStatus, WorkspaceStatus } from '../../shared/types'
-import { agentsDir, listAgents, NEXUS_DIR } from '../agents/config'
+import type { AgentConfig, AgentDetail, GitResult, McpStatus, ProjectTemplate, WorkspaceStatus } from '../../shared/types'
+import { agentsDir, listAgents, NEXUS_DIR, parseAgentYaml } from '../agents/config'
 import { git, isGitRepo, isRepoRoot } from '../git/git'
 
 // 工作区 = 所有 Agent 共享的项目仓库。这里负责按模板建目录、导出阶段 0 用的 Claude Code 定义、
@@ -28,21 +28,51 @@ function copyTree(from: string, to: string, created: string[], root: string): nu
   return skipped
 }
 
+/**
+ * 按模板建项目。已有的文件一律不覆盖，所以对已有的文件夹重复执行是安全的。
+ *   robot：机器人研发的目录结构，加四个专业 Agent 和一个总控
+ *   blank：只有项目总览和交接单目录，Agent 之后自己加
+ */
 export async function scaffoldWorkspace(
   workspace: string,
   defaultsDir: string,
+  template: ProjectTemplate = 'robot',
 ): Promise<{ created: string[]; skipped: number }> {
   const created: string[] = []
   let skipped = 0
   fs.mkdirSync(workspace, { recursive: true })
-  skipped += copyTree(path.join(defaultsDir, 'workspace'), workspace, created, workspace)
-  skipped += copyTree(path.join(defaultsDir, 'agents'), agentsDir(workspace), created, workspace)
-  skipped += copyTree(path.join(defaultsDir, 'prompts'), path.join(workspace, NEXUS_DIR, 'prompts'), created, workspace)
+  if (template === 'robot') {
+    skipped += copyTree(path.join(defaultsDir, 'workspace'), workspace, created, workspace)
+    skipped += copyTree(path.join(defaultsDir, 'agents'), agentsDir(workspace), created, workspace)
+    skipped += copyTree(path.join(defaultsDir, 'prompts'), path.join(workspace, NEXUS_DIR, 'prompts'), created, workspace)
+  } else {
+    skipped += copyTree(path.join(defaultsDir, 'workspace-blank'), workspace, created, workspace)
+    skipped += copyTree(path.join(defaultsDir, 'workspace', 'handoff'), path.join(workspace, 'handoff'), created, workspace)
+    fs.mkdirSync(agentsDir(workspace), { recursive: true })
+  }
   if (!(await isGitRepo(workspace))) {
     const init = await git(workspace, ['init'])
     if (init.ok) created.push('.git/（已执行 git init）')
   }
   return { created, skipped }
+}
+
+/** 自带的 Agent 模板：新建 Agent 时可以从它们开始。 */
+export function agentTemplates(defaultsDir: string): AgentDetail[] {
+  const dir = path.join(defaultsDir, 'agents')
+  const templates: AgentDetail[] = []
+  for (const file of fs.readdirSync(dir).sort()) {
+    if (!/\.ya?ml$/i.test(file)) continue
+    const id = file.replace(/\.ya?ml$/i, '')
+    try {
+      const config = parseAgentYaml(id, fs.readFileSync(path.join(dir, file), 'utf8'))
+      const promptFile = path.join(defaultsDir, config.system_prompt ?? `prompts/${id}.md`)
+      templates.push({ config, prompt: fs.existsSync(promptFile) ? fs.readFileSync(promptFile, 'utf8') : '' })
+    } catch {
+      // 模板随应用发布，这里不应该出错；出错就跳过这一个
+    }
+  }
+  return templates
 }
 
 export async function workspaceStatus(workspace: string | null): Promise<WorkspaceStatus> {

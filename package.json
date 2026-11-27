@@ -1,7 +1,7 @@
 {
   "name": "nexus-agent",
   "productName": "Nexus Agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "多 Agent 研发管理桌面应用：机械、电子、嵌入式、论文四个专业 Agent 的创建、调度、审批与成本统计（基于 Claude Agent SDK）",
   "private": true,
   "type": "module",
@@ -20,7 +20,8 @@
     "test": "vitest run",
     "check": "npm run typecheck && npm run test",
     "pack": "electron-vite build && electron-builder --win --dir",
-    "dist": "electron-vite build && electron-builder --win --publish never"
+    "dist": "electron-vite build && electron-builder --win --publish never",
+    "update:skill": "node scripts/update-easyeda-skill.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.332",
@@ -39,6 +40,7 @@
     "react-dom": "^19.3.1",
     "typescript": "^7.0.2",
     "vite": "^8.4.0",
-    "vitest": "^5.1.2"
+    "vitest": "^5.1.2",
+    "ws": "^8.23.0"
   }
 }

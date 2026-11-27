@@ -4,7 +4,7 @@ import path from 'node:path'
 import type { Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { saveAgent } from '../src/main/agents/config'
-import { AgentManager, type ManagerSettings } from '../src/main/agents/manager'
+import { AgentManager, type ManagerDeps, type ManagerSettings } from '../src/main/agents/manager'
 import { buildOptions, childEnv, type QueryFn, type QueryLike } from '../src/main/agents/runner'
 import { git } from '../src/main/git/git'
 import { Store } from '../src/main/store/db'
@@ -86,13 +86,13 @@ let store: Store
 let events: AppEvent[]
 let settings: ManagerSettings
 
-function makeManager(queryFn: QueryFn): AgentManager {
+function makeManager(queryFn: QueryFn, extra: Partial<ManagerDeps> = {}): AgentManager {
   return new AgentManager({
     store,
-    getWorkspace: () => workspace,
     getSettings: () => settings,
     emit: (event) => events.push(event),
     queryFn,
+    ...extra,
   })
 }
 
@@ -139,7 +139,7 @@ describe('配置到 SDK 参数的翻译', () => {
       }, calls),
     )
     settings.defaultMaxBudgetUsd = 5
-    expect(manager.submit('mech', '量一下支架孔距', 'user')).toMatchObject({ ok: true, mode: 'started' })
+    expect(manager.submit(workspace, 'mech', '量一下支架孔距', 'user')).toMatchObject({ ok: true, mode: 'started' })
     await until(finished(1), '任务结束')
 
     const options = calls[0]
@@ -234,7 +234,7 @@ describe('任务生命周期', () => {
         yield result('s1', 0.42)
       }),
     )
-    manager.submit('mech', '画一个支架并记笔记', 'user')
+    manager.submit(workspace, 'mech', '画一个支架并记笔记', 'user')
     await until(finished(1), '任务结束')
 
     const [task] = tasks()
@@ -244,7 +244,7 @@ describe('任务生命周期', () => {
     expect(store.getTask(task.id)?.status).toBe('done')
     expect(store.getCurrentSession(workspace, 'mech')).toBe('s1')
 
-    const transcript = await manager.transcript('mech')
+    const transcript = await manager.transcript(workspace, 'mech')
     const kinds = transcript.map((i) => i.kind)
     expect(kinds).toEqual(['user', 'assistant', 'tool', 'result'])
     const assistant = transcript[1] as Extract<ChatItem, { kind: 'assistant' }>
@@ -261,7 +261,7 @@ describe('任务生命周期', () => {
     // 机械 Agent 的提交不带走别人目录里的改动
     expect(log.output).not.toContain('elec/stray.md')
 
-    const state = manager.states().find((s) => s.agentId === 'mech')
+    const state = manager.states(workspace).find((s) => s.agentId === 'mech')
     expect(state).toMatchObject({ status: 'idle', sessionId: 's1', mcp: [{ name: 'fusion', status: 'connected' }] })
   })
 
@@ -276,9 +276,9 @@ describe('任务生命周期', () => {
         yield result('s1', total)
       }, calls),
     )
-    manager.submit('paper', '写相关工作', 'user')
+    manager.submit(workspace, 'paper', '写相关工作', 'user')
     await until(finished(1), '第一个任务')
-    manager.submit('paper', '补一段', 'user')
+    manager.submit(workspace, 'paper', '补一段', 'user')
     await until(finished(2), '第二个任务')
 
     expect(calls[1].resume).toBe('s1')
@@ -287,8 +287,8 @@ describe('任务生命周期', () => {
     expect(costs[1]).toBeCloseTo(0.3)
     expect(store.costSummary(workspace).totalUsd).toBeCloseTo(0.6)
 
-    manager.newSession('paper')
-    manager.submit('paper', '另起一个话题', 'user')
+    manager.newSession(workspace, 'paper')
+    manager.submit(workspace, 'paper', '另起一个话题', 'user')
     await until(finished(3), '第三个任务')
     expect(calls[2].resume).toBeUndefined()
   })
@@ -303,10 +303,10 @@ describe('任务生命周期', () => {
         yield result(forked ? 's1-fork' : 's1', forked ? 0.5 : 0.2)
       }, calls),
     )
-    manager.submit('paper', '第一版', 'user')
+    manager.submit(workspace, 'paper', '第一版', 'user')
     await until(finished(1), '第一个任务')
-    await manager.resumeSession('paper', 's1', true)
-    manager.submit('paper', '换个写法重试', 'user')
+    await manager.resumeSession(workspace, 'paper', 's1', true)
+    manager.submit(workspace, 'paper', '换个写法重试', 'user')
     await until(finished(2), '分叉后的任务')
 
     expect(calls[1]).toMatchObject({ resume: 's1', forkSession: true })
@@ -324,7 +324,7 @@ describe('任务生命周期', () => {
         yield result('s1', 2, { subtype: 'error_max_budget_usd', is_error: true, result: undefined })
       }),
     )
-    manager.submit('firmware', '重构整个固件', 'user')
+    manager.submit(workspace, 'firmware', '重构整个固件', 'user')
     await until(finished(1), '任务结束')
     const [task] = tasks()
     expect(task.status).toBe('error')
@@ -341,10 +341,10 @@ describe('任务生命周期', () => {
         yield result('s1', 0, { is_error: true, result: 'Invalid API key · Fix external API key' })
       }),
     )
-    manager.submit('paper', '写摘要', 'user')
+    manager.submit(workspace, 'paper', '写摘要', 'user')
     await until(finished(1), '任务结束')
     expect(tasks()[0]).toMatchObject({ status: 'error', error: 'Invalid API key · Fix external API key', costUsd: 0 })
-    const notes = (await manager.transcript('paper')).flatMap((i) => (i.kind === 'system' ? [i.text] : []))
+    const notes = (await manager.transcript(workspace, 'paper')).flatMap((i) => (i.kind === 'system' ? [i.text] : []))
     expect(notes.some((text) => text.includes('API Key 无效'))).toBe(true)
   })
 
@@ -355,11 +355,11 @@ describe('任务生命周期', () => {
         throw new Error('spawn claude ENOENT')
       }),
     )
-    manager.submit('firmware', '编译', 'user')
+    manager.submit(workspace, 'firmware', '编译', 'user')
     await until(finished(1), '任务结束')
     expect(tasks()[0]).toMatchObject({ status: 'error' })
     expect(tasks()[0].error).toContain('ENOENT')
-    expect(manager.states().find((s) => s.agentId === 'firmware')?.status).toBe('idle')
+    expect(manager.states(workspace).find((s) => s.agentId === 'firmware')?.status).toBe('idle')
   })
 })
 
@@ -392,13 +392,13 @@ describe('审批', () => {
       }, calls),
     )
 
-    manager.submit('firmware', '第一步', 'user')
+    manager.submit(workspace, 'firmware', '第一步', 'user')
     await until(() => approvals().length === 1, '第一个审批')
     const upload = approvals()[0]
     // 烧录命中 always_ask：不能选“一直允许”
     expect(upload).toMatchObject({ agentId: 'firmware', toolName: 'Bash', kind: 'tool', canAlwaysAllow: false })
     expect(upload.reason).toContain('每次确认')
-    expect(manager.states().find((s) => s.agentId === 'firmware')?.status).toBe('waiting-approval')
+    expect(manager.states(workspace).find((s) => s.agentId === 'firmware')?.status).toBe('waiting-approval')
     expect(manager.pendingApprovals()).toHaveLength(1)
     manager.resolveApproval({ id: upload.id, behavior: 'deny', message: '板子还没接电源' })
 
@@ -416,7 +416,7 @@ describe('审批', () => {
     })
     expect(manager.pendingApprovals()).toHaveLength(0)
 
-    manager.submit('firmware', '第二步', 'user')
+    manager.submit(workspace, 'firmware', '第二步', 'user')
     await until(finished(2), '第二个任务')
     expect(calls[1].allowedTools).toContain('Bash(pio test:*)')
     expect(calls[0].allowedTools).not.toContain('Bash(pio test:*)')
@@ -438,7 +438,7 @@ describe('审批', () => {
         yield result('s1', 0.1)
       }),
     )
-    manager.submit('mech', '改一个尺寸', 'user')
+    manager.submit(workspace, 'mech', '改一个尺寸', 'user')
     await until(finished(1), '任务结束')
     expect(hookResults[0]).toMatchObject({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' } })
     expect(hookResults[1]).toEqual({})
@@ -455,7 +455,7 @@ describe('审批', () => {
         yield result('s1', 0.1)
       }),
     )
-    manager.submit('elec', '给 IMU 分配中断引脚', 'user')
+    manager.submit(workspace, 'elec', '给 IMU 分配中断引脚', 'user')
     await until(() => approvals().length === 1, '问题')
     expect(approvals()[0]).toMatchObject({ kind: 'question', canAlwaysAllow: false, questions })
     manager.resolveApproval({ id: approvals()[0].id, behavior: 'allow', answers: { '用哪个引脚？': 'GPIO5' } })
@@ -468,20 +468,20 @@ describe('调度', () => {
   it('没有 Key、达到每月上限、配置有错时不启动', async () => {
     const manager = makeManager(fakeQuery(async function* () {}))
     settings.apiKey = null
-    expect(manager.submit('mech', 'x', 'user')).toMatchObject({ ok: false })
+    expect(manager.submit(workspace, 'mech', 'x', 'user')).toMatchObject({ ok: false })
     settings.apiKey = 'test-key'
-    expect(manager.submit('nobody', 'x', 'user').error).toContain('找不到')
-    expect(manager.submit('mech', '   ', 'user').ok).toBe(false)
+    expect(manager.submit(workspace, 'nobody', 'x', 'user').error).toContain('找不到')
+    expect(manager.submit(workspace, 'mech', '   ', 'user').ok).toBe(false)
 
     store.upsertTask({
       id: 'old', workspace, agentId: 'mech', agentName: '机械', sessionId: null, prompt: 'p', origin: 'user', status: 'done',
       startedAt: Date.now(), endedAt: Date.now(), costUsd: 12, numTurns: 1, durationMs: 1, resultSubtype: 'success', resultText: null, commitSha: null, error: null,
     })
     settings.monthlyBudgetUsd = 10
-    expect(manager.submit('mech', 'x', 'user').error).toContain('每月预算上限')
+    expect(manager.submit(workspace, 'mech', 'x', 'user').error).toContain('每月预算上限')
     settings.monthlyBudgetUsd = 20
     fs.writeFileSync(path.join(workspace, '.nexus/agents/mech.yaml'), 'name: 机械\n')
-    expect(manager.submit('mech', 'x', 'user').error).toContain('配置文件有错误')
+    expect(manager.submit(workspace, 'mech', 'x', 'user').error).toContain('配置文件有错误')
     expect(events.filter((e) => e.type === 'task-updated')).toHaveLength(0)
   })
 
@@ -506,11 +506,11 @@ describe('调度', () => {
         yield result(`s-${id}`, 0.1)
       }),
     )
-    expect(manager.submit('mech', '任务 A', 'user').mode).toBe('started')
-    expect(manager.submit('mech2', '任务 B', 'user').mode).toBe('queued')
-    expect(manager.submit('paper', '任务 C', 'user').mode).toBe('started')
+    expect(manager.submit(workspace, 'mech', '任务 A', 'user').mode).toBe('started')
+    expect(manager.submit(workspace, 'mech2', '任务 B', 'user').mode).toBe('queued')
+    expect(manager.submit(workspace, 'paper', '任务 C', 'user').mode).toBe('started')
     await until(() => Boolean(release.mech && release.paper), '两个任务都在跑')
-    expect(manager.states().find((s) => s.agentId === 'mech2')).toMatchObject({ status: 'queued', queueLength: 1 })
+    expect(manager.states(workspace).find((s) => s.agentId === 'mech2')).toMatchObject({ status: 'queued', queueLength: 1 })
     expect(release.mech2).toBeUndefined()
 
     release.mech()
@@ -537,18 +537,18 @@ describe('调度', () => {
         yield result('s1', 0.2)
       }),
     )
-    manager.submit('paper', '写摘要', 'user')
-    await until(() => seen.length === 1 && manager.states().some((s) => s.agentId === 'paper' && s.status === 'running'), '开始运行')
-    expect(manager.submit('paper', '控制在 150 词以内', 'user')).toMatchObject({ ok: true, mode: 'appended' })
+    manager.submit(workspace, 'paper', '写摘要', 'user')
+    await until(() => seen.length === 1 && manager.states(workspace).some((s) => s.agentId === 'paper' && s.status === 'running'), '开始运行')
+    expect(manager.submit(workspace, 'paper', '控制在 150 词以内', 'user')).toMatchObject({ ok: true, mode: 'appended' })
     await until(finished(1), '任务结束')
     expect(seen).toEqual(['写摘要', '控制在 150 词以内'])
     expect(tasks()).toHaveLength(1)
-    expect((await manager.transcript('paper')).filter((i) => i.kind === 'user')).toHaveLength(2)
+    expect((await manager.transcript(workspace, 'paper')).filter((i) => i.kind === 'user')).toHaveLength(2)
 
     seen.length = 0
-    manager.submit('paper', '再写一版', 'user')
-    await until(() => seen.length === 1 && manager.states().some((s) => s.agentId === 'paper' && s.status === 'running'), '第二个任务开始')
-    manager.interrupt('paper')
+    manager.submit(workspace, 'paper', '再写一版', 'user')
+    await until(() => seen.length === 1 && manager.states(workspace).some((s) => s.agentId === 'paper' && s.status === 'running'), '第二个任务开始')
+    manager.interrupt(workspace, 'paper')
     await until(finished(2), '中断结束')
     expect(tasks()[1].status).toBe('interrupted')
   })
@@ -561,9 +561,118 @@ describe('调度', () => {
         yield result('s-fw', 0.3, { result: '引脚已更新，编译通过' })
       }),
     )
-    const record = await manager.submitAndWait('firmware', '按交接单更新 IMU 引脚', 'orchestrator')
+    const record = await manager.submitAndWait(workspace, 'firmware', '按交接单更新 IMU 引脚', 'orchestrator')
     expect(record).toMatchObject({ status: 'done', origin: 'orchestrator', resultText: '引脚已更新，编译通过' })
     expect(record.costUsd).toBeCloseTo(0.3)
-    await expect(manager.submitAndWait('nobody', 'x', 'orchestrator')).rejects.toThrow()
+    await expect(manager.submitAndWait(workspace, 'nobody', 'x', 'orchestrator')).rejects.toThrow()
+  })
+})
+
+describe('多个项目', () => {
+  let second: string
+  beforeEach(async () => {
+    second = path.join(tmp, 'glider')
+    await scaffoldWorkspace(second, DEFAULTS, 'blank')
+    saveAgent(second, { id: 'mech', name: '滑翔机机械', model: 'm', resource: 'fusion' }, '另一个项目的机械 Agent')
+    saveAgent(second, { id: 'notes', name: '笔记', model: 'm' }, '')
+  })
+
+  it('各项目有自己的 Agent、会话和对话记录，事件带着项目路径', async () => {
+    const manager = makeManager(
+      fakeQuery(async function* (ctx) {
+        await ctx.nextUserText()
+        const session = ctx.options.cwd === second ? 's-glider' : 's-robot'
+        yield init(session)
+        yield say(session, ctx.options.cwd === second ? '滑翔机' : '机器人')
+        yield result(session, 0.2)
+      }),
+    )
+    expect(manager.states(second).map((s) => s.agentId)).toEqual(['mech', 'notes'])
+    expect(manager.states(workspace).map((s) => s.agentId)).toContain('firmware')
+    manager.submit(workspace, 'mech', '画机器人支架', 'user')
+    await until(finished(1), '第一个项目的任务')
+    manager.submit(second, 'mech', '画机翼', 'user')
+    await until(finished(2), '第二个项目的任务')
+
+    expect(store.getCurrentSession(workspace, 'mech')).toBe('s-robot')
+    expect(store.getCurrentSession(second, 'mech')).toBe('s-glider')
+    const robot = (await manager.transcript(workspace, 'mech')).flatMap((i) => (i.kind === 'assistant' ? [i.text] : []))
+    const glider = (await manager.transcript(second, 'mech')).flatMap((i) => (i.kind === 'assistant' ? [i.text] : []))
+    expect(robot).toEqual(['机器人'])
+    expect(glider).toEqual(['滑翔机'])
+    const chats = events.flatMap((e) => (e.type === 'chat' ? [e.workspace] : []))
+    expect(new Set(chats)).toEqual(new Set([workspace, second]))
+    expect(store.costSummary(workspace).totalUsd).toBeCloseTo(0.2)
+    expect(store.costSummary(second).totalUsd).toBeCloseTo(0.2)
+    expect(store.costSummary(second).allProjectsMonthUsd).toBeCloseTo(0.4)
+    expect(tasks().map((t) => t.workspace)).toEqual([workspace, second])
+  })
+
+  it('不同项目可以同时跑，但 Fusion 这样的独占资源跨项目也只给一个', async () => {
+    const release: Record<string, () => void> = {}
+    const manager = makeManager(
+      fakeQuery(async function* (ctx) {
+        await ctx.nextUserText()
+        const id = /id：(\S+?)）/.exec((ctx.options.systemPrompt as { append: string }).append)?.[1] ?? '?'
+        const key = `${ctx.options.cwd === second ? 'glider' : 'robot'}:${id}`
+        yield init(`s-${key}`)
+        await new Promise<void>((resolve) => {
+          release[key] = resolve
+        })
+        yield result(`s-${key}`, 0.1)
+      }),
+    )
+    expect(manager.submit(workspace, 'mech', 'A', 'user').mode).toBe('started')
+    expect(manager.submit(second, 'mech', 'B', 'user').mode).toBe('queued')
+    expect(manager.submit(second, 'notes', 'C', 'user').mode).toBe('started')
+    await until(() => Boolean(release['robot:mech'] && release['glider:notes']), '两个项目各有任务在跑')
+    expect(release['glider:mech']).toBeUndefined()
+    expect(manager.activeTasks()).toBe(3)
+    expect(manager.activeTasks(second)).toBe(2)
+    expect(manager.isBusy(workspace)).toBe(true)
+
+    release['robot:mech']()
+    await until(() => Boolean(release['glider:mech']), '排队的任务拿到 Fusion')
+    release['glider:mech']()
+    release['glider:notes']()
+    await until(finished(3), '全部结束')
+    expect(manager.isBusy()).toBe(false)
+  })
+
+  it('每月预算上限按所有项目的合计算', () => {
+    const manager = makeManager(fakeQuery(async function* () {}))
+    store.upsertTask({
+      id: 'old', workspace: second, agentId: 'mech', agentName: '机械', sessionId: null, prompt: 'p', origin: 'user', status: 'done',
+      startedAt: Date.now(), endedAt: Date.now(), costUsd: 12, numTurns: 1, durationMs: 1, resultSubtype: 'success', resultText: null, commitSha: null, error: null,
+    })
+    settings.monthlyBudgetUsd = 10
+    expect(manager.submit(workspace, 'mech', 'x', 'user').error).toContain('每月预算上限')
+  })
+
+  it('任务启动前的准备：提示显示在对话里，准备出错也不挡任务', async () => {
+    const seen: string[] = []
+    const manager = makeManager(
+      fakeQuery(async function* (ctx) {
+        await ctx.nextUserText()
+        yield init('s1')
+        yield result('s1', 0.1)
+      }),
+      {
+        prepare: async (dir, config) => {
+          seen.push(`${dir === workspace ? 'robot' : 'other'}:${config.id}`)
+          if (config.id === 'paper') throw new Error('磁盘满了')
+          return [{ level: 'info', text: '已把内置的技能装进这个项目。' }]
+        },
+      },
+    )
+    manager.submit(workspace, 'elec', '查一颗电感', 'user')
+    manager.submit(workspace, 'paper', '写摘要', 'user')
+    await until(finished(2), '两个任务结束')
+    expect(seen.sort()).toEqual(['robot:elec', 'robot:paper'])
+    const elecNotes = (await manager.transcript(workspace, 'elec')).flatMap((i) => (i.kind === 'system' ? [i.text] : []))
+    const paperNotes = (await manager.transcript(workspace, 'paper')).flatMap((i) => (i.kind === 'system' ? [i.text] : []))
+    expect(elecNotes).toContain('已把内置的技能装进这个项目。')
+    expect(paperNotes.some((text) => text.includes('磁盘满了'))).toBe(true)
+    expect(tasks().every((t) => t.status === 'done')).toBe(true)
   })
 })

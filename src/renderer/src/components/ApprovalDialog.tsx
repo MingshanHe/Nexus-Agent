@@ -7,6 +7,8 @@ import { toolLabel } from '../format'
 
 interface Props {
   request: ApprovalRequest
+  /** 有多个项目时显示这次审批来自哪个项目 */
+  projectName: string | null
   position: number
   total: number
 }
@@ -125,7 +127,7 @@ function Questions({
   )
 }
 
-export function ApprovalDialog({ request, position, total }: Props) {
+export function ApprovalDialog({ request, projectName, position, total }: Props) {
   const [note, setNote] = useState('')
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [sending, setSending] = useState(false)
@@ -153,6 +155,7 @@ export function ApprovalDialog({ request, position, total }: Props) {
             <div className="eyebrow">
               {isQuestion ? '需要你回答' : '需要你审批'}
               {total > 1 ? `（${position}/${total}）` : ''}
+              {projectName ? ` · 项目：${projectName}` : ''}
             </div>
             <h2>
               {request.agentName}

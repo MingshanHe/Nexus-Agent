@@ -10,7 +10,7 @@ import type {
   WorkspaceStatus,
 } from '../../shared/types'
 
-export type View = 'chat' | 'handoffs' | 'costs' | 'settings'
+export type View = 'chat' | 'handoffs' | 'costs' | 'projects' | 'settings'
 
 export interface UiState {
   ready: boolean
@@ -65,9 +65,21 @@ function upsert(items: ChatItem[], item: ChatItem): ChatItem[] {
   return next
 }
 
+function sameProject(a: string | null | undefined, b: string | null | undefined): boolean {
+  return Boolean(a) && Boolean(b) && (a as string).toLowerCase() === (b as string).toLowerCase()
+}
+
 function applyEvent(state: UiState, event: AppEvent): UiState {
+  // 别的项目里的任务也在后台跑：它们的对话和状态不属于当前界面（审批除外，审批是全局的）
+  if (
+    (event.type === 'chat' || event.type === 'chat-delta' || event.type === 'chat-reset') &&
+    !sameProject(event.workspace, state.settings?.workspace)
+  ) {
+    return state
+  }
   switch (event.type) {
     case 'agent-state':
+      if (!sameProject(event.state.workspace, state.settings?.workspace)) return state
       return { ...state, states: { ...state.states, [event.state.agentId]: event.state } }
     case 'chat': {
       const items = state.transcripts[event.agentId]
@@ -106,9 +118,11 @@ function reducer(state: UiState, action: Action): UiState {
       const ids = action.agents.map((a) => a.config.id)
       const selected =
         state.selectedAgentId && ids.includes(state.selectedAgentId) ? state.selectedAgentId : (ids[0] ?? null)
-      const needsSetup = !action.settings.workspace || action.agents.length === 0
+      const switched = !sameProject(action.settings.workspace, state.settings?.workspace)
       return {
         ...state,
+        // 换了项目：之前项目的对话记录不再属于当前界面
+        transcripts: switched ? {} : state.transcripts,
         ready: true,
         settings: action.settings,
         workspace: action.workspace,
@@ -117,7 +131,7 @@ function reducer(state: UiState, action: Action): UiState {
         approvals: action.approvals,
         handoffs: action.handoffs,
         selectedAgentId: selected,
-        view: !state.ready && needsSetup ? 'settings' : state.view,
+        view: !action.settings.workspace ? 'projects' : switched && state.ready ? 'chat' : state.view,
       }
     }
     case 'event':
