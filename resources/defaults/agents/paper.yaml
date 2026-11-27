@@ -1,0 +1,34 @@
+# 论文 Agent：读另外三个目录里的设计说明、实验数据和图，写进 paper/ 的 LaTeX 工程
+name: 论文 Agent
+description: 文献检索整理、起草章节、图表脚本、LaTeX 编译（paper/ 可关联 Overleaf）
+model: claude-sonnet-5-5
+system_prompt: prompts/paper.md
+
+allowed_tools:
+  - Read
+  - Grep
+  - Glob
+  - WebSearch
+  - WebFetch
+  - Edit(/paper/**) # 只写 paper/ 目录
+  - Edit(/handoff/**)
+  - Bash(latexmk *)
+  - Bash(pdflatex *)
+  - Bash(xelatex *)
+  - Bash(bibtex *)
+  - Bash(biber *)
+  - PowerShell(latexmk *)
+  - PowerShell(pdflatex *)
+  - PowerShell(xelatex *)
+  - PowerShell(bibtex *)
+  - PowerShell(biber *)
+
+# 往 Overleaf 推送由你在“设置”里点按钮完成；Agent 自己想推送时每次都要确认
+always_ask:
+  - Bash(*git push*)
+  - PowerShell(*git push*)
+
+git:
+  # paper/ 关联 Overleaf 后是独立仓库：先在里面提交，再提交工作区里的其余改动
+  repo: paper
+  paths: [paper, handoff]

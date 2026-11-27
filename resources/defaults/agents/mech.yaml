@@ -1,0 +1,30 @@
+# 机械 Agent：由管理软件翻译成 Claude Agent SDK 的参数
+name: 机械 Agent
+description: 参数化建模、装配、读尺寸、导出 STEP/STL（通过 Fusion 官方本地 MCP 服务）
+model: claude-opus-5-5
+system_prompt: prompts/mech.md
+
+# Fusion 一次只跑一个任务：同名资源的 Agent 会排队
+resource: fusion
+
+mcp_servers:
+  fusion:
+    type: http
+    url: http://127.0.0.1:27182/mcp # Fusion“偏好设置 > 常规 > API”里启用
+
+# 自动放行；其余调用都弹审批。工具名以连接后实际列出的为准
+allowed_tools:
+  - Read
+  - Grep
+  - Glob
+  - mcp__fusion__fusion_mcp_read
+  - Edit(/mech/**) # 只能自动写自己的目录
+  - Edit(/handoff/**)
+
+# 每次都要人工确认，不能选“本次会话一直允许”。跑顺之后可以把低风险的挪到 allowed_tools
+always_ask:
+  - mcp__fusion__fusion_mcp_execute
+  - mcp__fusion__fusion_mcp_update
+
+git:
+  paths: [mech, handoff, spec]

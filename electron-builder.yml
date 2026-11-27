@@ -1,0 +1,38 @@
+appId: com.mingshanhe.nexus-agent
+productName: Nexus Agent
+copyright: Copyright © 2026 MingshanHe
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - out/**
+  - package.json
+
+# Claude Agent SDK 自带的 Claude Code 可执行文件要作为子进程启动，不能留在 asar 里
+asarUnpack:
+  - node_modules/@anthropic-ai/claude-agent-sdk-*/**
+
+# 默认的 Agent 配置、提示词和工作区模板
+extraResources:
+  - from: resources/defaults
+    to: defaults
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: Nexus-Agent-Setup-${version}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Nexus Agent
+  uninstallDisplayName: Nexus Agent
+
+# 发布由 GitHub Actions 里的 gh release 完成，electron-builder 自己不上传
+publish: null

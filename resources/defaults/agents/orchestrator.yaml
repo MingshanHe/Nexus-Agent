@@ -1,0 +1,22 @@
+# 总控 Agent（可选，建议四个专业 Agent 各自稳定后再用）。
+# 它自己只读，通过管理软件提供的 dispatch(agent, task) 把目标拆给各专业 Agent 并跟踪交接单。
+name: 总控 Agent
+description: 把“加一个传感器”这样的目标拆成各专业的任务，派发并跟踪交接单
+role: orchestrator
+model: claude-opus-5-5
+system_prompt: prompts/orchestrator.md
+
+allowed_tools:
+  - Read
+  - Grep
+  - Glob
+  - mcp__nexus__list_agents
+  - mcp__nexus__list_handoffs
+# mcp__nexus__dispatch 故意不放行：每次派发都先弹审批
+
+disallowed_tools:
+  - Write
+  - Edit
+  - NotebookEdit
+  - Bash
+  - PowerShell

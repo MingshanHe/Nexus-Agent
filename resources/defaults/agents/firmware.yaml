@@ -1,0 +1,44 @@
+# 控制与嵌入式 Agent：不需要额外的 MCP，直接用 SDK 自带的文件和命令行工具调 PlatformIO
+name: 控制与嵌入式 Agent
+description: 控制算法、仿真脚本、固件、编译、烧录、串口日志分析（PlatformIO）
+model: claude-sonnet-5-5
+system_prompt: prompts/firmware.md
+
+allowed_tools:
+  - Read
+  - Grep
+  - Glob
+  - Edit(/firmware/**)
+  - Edit(/handoff/**)
+  # 编译、静态检查、本机单元测试：不碰硬件，自动放行
+  - Bash(pio run)
+  - Bash(pio run -e *)
+  - Bash(pio run -d *)
+  - Bash(pio check *)
+  - Bash(pio test -e native*)
+  - Bash(pio device list*)
+  - PowerShell(pio run)
+  - PowerShell(pio run -e *)
+  - PowerShell(pio run -d *)
+  - PowerShell(pio check *)
+  - PowerShell(pio test -e native*)
+  - PowerShell(pio device list*)
+
+# 它是唯一会碰真实硬件的 Agent：烧录、擦除、装依赖每次都要你确认。
+# ask 规则优先于放行规则，所以 `pio run -e xxx -t upload` 仍然会弹审批
+always_ask:
+  - Bash(*upload*)
+  - Bash(*erase*)
+  - Bash(*esptool*)
+  - Bash(pio pkg *)
+  - Bash(pio lib *)
+  - Bash(*pip install*)
+  - PowerShell(*upload*)
+  - PowerShell(*erase*)
+  - PowerShell(*esptool*)
+  - PowerShell(pio pkg *)
+  - PowerShell(pio lib *)
+  - PowerShell(*pip install*)
+
+git:
+  paths: [firmware, handoff, spec]
