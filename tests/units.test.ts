@@ -21,10 +21,11 @@ import {
   setHandoffStatus,
 } from '../src/main/handoff/handoffs'
 import { SettingsStore } from '../src/main/settings'
+import { UpdateService, type UpdaterLike } from '../src/main/updater'
 import { Store, taskCostFromReported } from '../src/main/store/db'
 import { EdaBridge, installedSkillDir, installSkill, skillVersion, usesEasyedaSkill } from '../src/main/eda/easyeda'
 import { agentTemplates, exportClaudeAgents, scaffoldWorkspace } from '../src/main/workspace/scaffold'
-import type { TaskRecord } from '../src/shared/types'
+import type { TaskRecord, UpdateState } from '../src/shared/types'
 
 const DEFAULTS = path.resolve('resources/defaults')
 
@@ -546,4 +547,103 @@ describe('内置的 EasyEDA API Skill', () => {
     const broken = new EdaBridge({ skillDir: () => null, execPath: process.execPath })
     if (!before.running) expect((await broken.ensureRunning()).error).toContain('没有找到')
   }, 30_000)
+})
+
+describe('软件内更新', () => {
+  function fakeUpdater(script: { latest?: string; failCheck?: string; failDownload?: string } = {}) {
+    const listeners = new Map<string, (...args: any[]) => void>()
+    const log: string[] = []
+    const updater: UpdaterLike = {
+      autoDownload: true,
+      autoInstallOnAppQuit: false,
+      on: (event, listener) => {
+        listeners.set(event, listener)
+        return updater
+      },
+      checkForUpdates: async () => {
+        log.push('check')
+        if (script.failCheck) throw new Error(script.failCheck)
+        if (script.latest) listeners.get('update-available')?.({ version: script.latest, releaseNotes: '<p>修了一些问题</p>' })
+        else listeners.get('update-not-available')?.({ version: '0.3.0' })
+      },
+      downloadUpdate: async () => {
+        log.push('download')
+        if (script.failDownload) throw new Error(script.failDownload)
+        listeners.get('download-progress')?.({ percent: 41.6 })
+        listeners.get('update-downloaded')?.({ version: script.latest })
+      },
+      quitAndInstall: (silent, relaunch) => {
+        log.push(`install silent=${silent} relaunch=${relaunch}`)
+      },
+    }
+    return { updater, log }
+  }
+
+  function service(updater: UpdaterLike | null, busy = false, supported = true) {
+    const states: UpdateState[] = []
+    const flags = { busy, restarting: false }
+    const svc = new UpdateService(updater, {
+      currentVersion: '0.3.0',
+      supported,
+      onChange: (state) => states.push(state),
+      isBusy: () => flags.busy,
+      beforeRestart: () => {
+        flags.restarting = true
+      },
+    })
+    return { svc, states, flags }
+  }
+
+  it('开发模式不支持更新；不会偷偷下载', async () => {
+    const { svc } = service(null, false, false)
+    expect(svc.status().phase).toBe('unsupported')
+    expect((await svc.check()).phase).toBe('unsupported')
+    expect((await svc.install()).phase).toBe('unsupported')
+
+    const { updater } = fakeUpdater()
+    service(updater)
+    expect(updater.autoDownload).toBe(false)
+  })
+
+  it('已经是最新', async () => {
+    const { updater, log } = fakeUpdater()
+    const { svc } = service(updater)
+    expect(await svc.check()).toMatchObject({ phase: 'up-to-date', currentVersion: '0.3.0', error: null })
+    expect((await svc.install()).phase).toBe('up-to-date')
+    expect(log).toEqual(['check', 'check'])
+  })
+
+  it('一键更新：检查、下载、没有任务在跑就直接重启安装', async () => {
+    const { updater, log } = fakeUpdater({ latest: '0.3.1' })
+    const { svc, states, flags } = service(updater)
+    expect(await svc.check()).toMatchObject({ phase: 'available', latestVersion: '0.3.1', notes: '修了一些问题' })
+    await svc.install()
+    expect(states.map((s) => s.phase)).toEqual(['checking', 'available', 'downloading', 'downloading', 'ready'])
+    expect(states.find((s) => s.percent === 42)).toBeTruthy()
+    expect(log).toEqual(['check', 'download', 'install silent=true relaunch=true'])
+    expect(flags.restarting).toBe(true)
+  })
+
+  it('有任务在跑时下载完不重启，等用户点“重启并安装”', async () => {
+    const { updater, log } = fakeUpdater({ latest: '0.3.1' })
+    const { svc, flags } = service(updater, true)
+    expect((await svc.install()).phase).toBe('ready')
+    expect(log).toEqual(['check', 'download'])
+    await svc.install()
+    expect(log).toEqual(['check', 'download'])
+    flags.busy = false
+    svc.restart()
+    expect(log.at(-1)).toBe('install silent=true relaunch=true')
+  })
+
+  it('发布页上没有更新文件、断网、下载失败时给出能看懂的说明', async () => {
+    const missing = service(fakeUpdater({ failCheck: 'Cannot find latest.yml in the latest release artifacts: HttpError: 404' }).updater)
+    expect(await missing.svc.check()).toMatchObject({ phase: 'error', error: expect.stringContaining('没有找到可用的更新信息') })
+    const offline = service(fakeUpdater({ failCheck: 'net::ERR_INTERNET_DISCONNECTED' }).updater)
+    expect((await offline.svc.check()).error).toContain('连不上 GitHub')
+    const broken = service(fakeUpdater({ latest: '0.3.1', failDownload: 'sha512 checksum mismatch' }).updater)
+    expect(await broken.svc.install()).toMatchObject({ phase: 'error', error: 'sha512 checksum mismatch' })
+    // 出错后可以再试
+    expect((await broken.svc.check()).phase).toBe('available')
+  })
 })

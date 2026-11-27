@@ -1,4 +1,4 @@
-import type { AgentStatus, TaskStatus } from '../../shared/types'
+import type { AgentStatus, PermissionMode, TaskStatus } from '../../shared/types'
 
 export function usd(value: number): string {
   if (value === 0) return '$0.00'
@@ -75,4 +75,35 @@ export function toolSummary(name: string, input: unknown): string {
 export function toolLabel(name: string): string {
   const match = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(name)
   return match ? `${match[1]} · ${match[2]}` : name
+}
+
+
+export const MODE_LABEL: Record<PermissionMode, string> = {
+  default: '逐项审批',
+  acceptEdits: '自动接受编辑',
+  auto: '自动模式',
+  plan: '计划模式',
+  bypassPermissions: '全部放行',
+}
+
+export const MODE_HINT: Record<PermissionMode, string> = {
+  default: '没有放行的调用都会问你',
+  acceptEdits: '项目里的文件改动和常见文件命令不再问，其余照常审批',
+  auto: '由分类器模型逐个判断是否安全，拿不准的才问你（分类器的调用也计费）',
+  plan: '只读探索并写出计划，你批准后才开始动手',
+  bypassPermissions: '几乎什么都不问就执行；配置里“每次都要确认”的调用仍然会问',
+}
+
+/** Shift+Tab 轮换的顺序；“全部放行”不在轮换里，要从下拉框里明确选 */
+export const MODE_CYCLE: PermissionMode[] = ['default', 'acceptEdits', 'auto', 'plan']
+
+const COMMAND_HINT: Record<string, string> = {
+  clear: '开始一个新会话（旧会话留在“历史会话”里）',
+  compact: '压缩上下文：把更早的对话换成摘要',
+  context: '查看上下文窗口的占用',
+  usage: '查看这个会话的用量',
+}
+
+export function commandHint(name: string): string {
+  return COMMAND_HINT[name] ?? ''
 }

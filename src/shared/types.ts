@@ -2,6 +2,17 @@
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
+/**
+ * 权限模式，和 Claude Code 的一致：
+ *   default           逐项审批：没放行的调用都问
+ *   acceptEdits       自动接受编辑：工作目录里的文件改动和常见文件命令不再问
+ *   auto              自动模式：由分类器模型逐个判断，拿不准的才问
+ *   plan              计划模式：只读探索、写计划，计划批准后才动手
+ *   bypassPermissions 全部放行：除了 always_ask 和少数危险操作，什么都不问
+ */
+export type PermissionMode = 'default' | 'acceptEdits' | 'auto' | 'plan' | 'bypassPermissions'
+export const PERMISSION_MODES: PermissionMode[] = ['default', 'acceptEdits', 'auto', 'plan', 'bypassPermissions']
+
 export interface McpServerSpec {
   type: 'http' | 'sse' | 'stdio'
   /** http / sse */
@@ -22,6 +33,8 @@ export interface AgentConfig {
   role?: 'specialist' | 'orchestrator'
   model: string
   effort?: EffortLevel
+  /** 这个 Agent 默认的权限模式；对话时可以随时切换 */
+  permission_mode?: PermissionMode
   /** 相对工作区根目录的路径，或绝对路径；默认是工作区根目录 */
   cwd?: string
   /** 提示词文件，相对 .nexus/ 目录，例如 prompts/mech.md */
@@ -76,6 +89,12 @@ export interface AgentRuntimeState {
   mcp: McpStatus[]
   model?: string
   apiKeySource?: string
+  /** 当前生效的权限模式 */
+  permissionMode: PermissionMode
+  /** 会话里可用的斜杠命令（不带斜杠） */
+  slashCommands: string[]
+  /** 正在跑的任务是什么时候开始的 */
+  runningSince: number | null
 }
 
 export type TaskStatus = 'queued' | 'running' | 'done' | 'error' | 'interrupted'
@@ -145,7 +164,8 @@ export interface ApprovalRequest {
   agentId: string
   agentName: string
   taskId: string
-  kind: 'tool' | 'question'
+  /** tool：工具调用；question：Agent 在问你问题；plan：计划模式下请你批准计划 */
+  kind: 'tool' | 'question' | 'plan'
   toolName: string
   input: Record<string, unknown>
   title?: string
@@ -155,13 +175,24 @@ export interface ApprovalRequest {
   canAlwaysAllow: boolean
   /** 选“一直允许”时会加进放行名单的规则 */
   alwaysAllowRules: string[]
+  /** 这次审批是 always_ask 规则强制的：不提供“一直允许”，也不响应快捷键 */
+  forced: boolean
+  /** kind === 'plan' 时的计划正文 */
+  plan?: string
   questions?: Question[]
   createdAt: number
 }
 
 export interface ApprovalDecision {
   id: string
-  behavior: 'allow' | 'allow_session' | 'deny'
+  /**
+   * allow          允许这一次
+   * allow_session  本次会话内一直允许
+   * allow_always   一直允许，并把规则写进这个 Agent 的配置文件
+   */
+  behavior: 'allow' | 'allow_session' | 'allow_always' | 'deny'
+  /** 批准计划后切到哪个权限模式 */
+  planMode?: PermissionMode
   /** 拒绝时给 Agent 看的说明 */
   message?: string
   /** kind === 'question' 时的回答：问题原文 -> 选项或自由文本 */
@@ -250,6 +281,18 @@ export interface BridgeStatus {
   error?: string
 }
 
+/** 软件更新的状态 */
+export interface UpdateState {
+  phase: 'unsupported' | 'idle' | 'checking' | 'up-to-date' | 'available' | 'downloading' | 'ready' | 'error'
+  currentVersion: string
+  latestVersion: string | null
+  /** 下载进度 0–100 */
+  percent: number
+  notes: string | null
+  error: string | null
+  checkedAt: number | null
+}
+
 export interface AppSettings {
   /** 当前项目的文件夹；没有项目时为 null */
   workspace: string | null
@@ -300,6 +343,7 @@ export type AppEvent =
   | { type: 'approval-request'; request: ApprovalRequest }
   | { type: 'approval-resolved'; id: string }
   | { type: 'handoffs-changed'; handoffs: Handoff[] }
+  | { type: 'update-state'; state: UpdateState }
 
 export interface StartTaskResult {
   ok: boolean
@@ -350,6 +394,8 @@ export interface NexusApi {
     interrupt(agentId: string): Promise<void>
     transcript(agentId: string): Promise<ChatItem[]>
     newSession(agentId: string): Promise<void>
+    /** 切换权限模式；任务进行中会立刻生效。返回实际生效的模式 */
+    setMode(agentId: string, mode: PermissionMode): Promise<PermissionMode>
   }
   sessions: {
     list(agentId: string): Promise<SessionInfo[]>
@@ -367,6 +413,14 @@ export interface NexusApi {
   }
   costs: {
     summary(): Promise<CostSummary>
+  }
+  updates: {
+    status(): Promise<UpdateState>
+    check(): Promise<UpdateState>
+    /** 下载新版本；下载完且没有任务在跑时自动重启安装 */
+    install(): Promise<UpdateState>
+    /** 新版本已下载好：现在重启并安装 */
+    restart(): Promise<void>
   }
   eda: {
     status(): Promise<BridgeStatus>
@@ -389,11 +443,12 @@ export const API_METHODS = {
   projects: ['list', 'chooseFolder', 'create', 'open', 'rename', 'remove', 'reveal'],
   workspace: ['status', 'scaffold', 'exportClaudeAgents', 'openInExplorer'],
   agents: ['list', 'templates', 'save', 'remove', 'duplicate', 'states', 'probeMcp'],
-  tasks: ['start', 'interrupt', 'transcript', 'newSession'],
+  tasks: ['start', 'interrupt', 'transcript', 'newSession', 'setMode'],
   sessions: ['list', 'resume'],
   approvals: ['pending', 'resolve'],
   handoffs: ['list', 'dispatch', 'setStatus', 'create'],
   costs: ['summary'],
+  updates: ['status', 'check', 'install', 'restart'],
   eda: ['status', 'startBridge', 'stopBridge', 'installSkill'],
   overleaf: ['link', 'pull', 'push'],
 } as const satisfies { [G in Exclude<keyof NexusApi, 'onEvent'>]: ReadonlyArray<keyof NexusApi[G]> }

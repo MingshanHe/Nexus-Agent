@@ -11,7 +11,7 @@
 - 安装包约数百 MB：里面带着 Claude Code 的可执行文件和 EasyEDA API Skill，不需要另装 Node 或 Claude Code。
 - 安装包没有代码签名，Windows SmartScreen 会提示“未知发布者”，需要点“仍要运行”。
 - 目前只构建 Windows x64。
-- 从 0.1.0 升级：直接运行新的安装包。原来的工作区会自动变成第一个项目，设置和历史记录都保留。
+- 0.3.0 起可以在软件内一键更新（见下面的“软件更新”）。从更早的版本升级需要手动装一次新的安装包；原来的工作区会自动变成第一个项目，设置和历史记录都保留。
 
 ## 第一次使用
 
@@ -57,13 +57,58 @@ robot-project/
 | Agent 列表与配置 | 新建（可从模板）、复制、编辑、删除 Agent；显示各自的 MCP 服务是否连上 |
 | 对话与任务 | 选一个 Agent 派任务，流式看它的回复和工具调用；任务进行中可以追加指令或中断 |
 | 会话历史 | 每个 Agent 的历史会话可以恢复，也可以分叉出一个分支重试 |
-| 审批 | 没有自动放行的调用弹窗，显示工具名和参数；可以批准、拒绝（并附说明）或本次会话内一直允许 |
+| 权限模式 | 和 Claude Code 一样的五种模式：逐项审批、自动接受编辑、自动模式、计划模式、全部放行；对话时随时切换 |
+| 审批 | 审批直接出现在对话里，不挡住别的操作；可以允许一次、本次会话一直允许、一直允许并写入配置，或拒绝并告诉它该怎么做 |
 | 成本 | 按任务、按 Agent、按天统计；可以设单任务预算、单任务轮数和每月预算上限 |
 | 交接看板 | 监视 `handoff/` 目录，新交接单显示为待办，点一下派给接收方跟进 |
 | 自动提交 | 每个任务结束提交一次 Git，提交信息以 `[agent id]` 开头 |
 | 嘉立创EDA | 内置官方的 EasyEDA API Skill，桥接服务由应用启动，界面显示嘉立创EDA 窗口是否连上 |
 | 总控 Agent | 一个只读的 Agent，用 `dispatch(agent, task)` 把目标拆给本项目的专业 Agent；每次派发都要你确认 |
 | 通知 | 窗口不在前台时，需要审批或任务结束会发系统通知；还有任务在跑时关窗口会先问一句 |
+| 软件更新 | 在软件里检查、下载并重启安装新版本 |
+
+## 对话和权限模式
+
+对话的用法参考了 Claude Code。
+
+**权限模式**在输入框下面切换，也可以按 Shift+Tab 轮换。每个 Agent 的默认模式写在它的配置里（`permission_mode`），对话时切换的只在本次运行期间有效。
+
+| 模式 | 什么不用问 | 适合什么时候 |
+| --- | --- | --- |
+| 逐项审批（`default`） | 只有配置里自动放行的调用 | 默认；写 CAD、写 PCB、碰硬件的 Agent |
+| 自动接受编辑（`acceptEdits`） | 项目里的文件改动和常见文件命令（建目录、移动、删除等） | 写代码、写论文这类改动都能用 Git 回滚的工作 |
+| 自动模式（`auto`） | 由分类器模型逐个判断是否安全，拿不准的才问 | 想少被打断又不想完全放开。需要 Opus 4.6 / Sonnet 4.6 及以上的模型；分类器的调用也计费。不可用时会自动回到逐项审批并提示 |
+| 计划模式（`plan`） | 只读探索 | 大改动之前。Agent 先写出计划，你批准后才动手，批准时选之后用哪种模式 |
+| 全部放行（`bypassPermissions`） | 几乎所有调用 | 你信得过当前任务、改动都能回滚的时候。切换时会让你确认 |
+
+不管在哪种模式下，配置里 `always_ask` 的调用（默认是 Fusion 的写操作、烧录、擦除、装依赖、向 Overleaf 推送）每次都会问你，“全部放行”也不例外。
+
+**审批**出现在对话里，不再弹窗：
+
+- `1` 允许这一次，`2` 本次会话内一直允许，`3` 一直允许并把规则写进这个 Agent 的配置文件，`Esc` 拒绝。
+- 在卡片里的输入框写一句话再回车，等于“拒绝，并告诉它该怎么做”。
+- `always_ask` 的调用没有快捷键，也不能选“一直允许”，必须用鼠标点。
+- 别的 Agent 或别的项目有审批在等时，顶部出现一条提示，点一下跳过去。
+
+**输入框**：
+
+| 按键 | 作用 |
+| --- | --- |
+| Enter / Shift+Enter | 发送 / 换行。任务进行中发送的内容作为追加指令 |
+| Shift+Tab | 轮换权限模式 |
+| Esc | 清空输入；输入为空时中断正在跑的任务 |
+| ↑ / ↓ | 回看之前发过的指令 |
+| `/` | 列出命令：`/clear` 开新会话，`/compact` 压缩上下文，`/context` 看上下文占用，`/usage` 看用量，以及项目里的技能 |
+
+对话里的文件修改显示成增删行，命令显示输出，失败的调用直接露出原因。
+
+## 软件更新
+
+“设置 > 软件更新”里可以检查更新。有新版本时侧边栏左下角也会出现提示，点一下就开始：下载完如果没有任务在跑，自动重启并安装；有任务在跑则等你点“重启并安装”。
+
+- 更新从这个仓库的 GitHub Releases 下载，应用启动后会自动检查一次，之后每 6 小时检查一次；只提示，不会在后台自动下载。
+- 安装包没有代码签名，所以更新时不验证发布者，只校验下载文件的完整性（sha512）。
+- 只有用安装包装的版本能更新。
 
 ## 嘉立创EDA
 
@@ -95,8 +140,9 @@ allowed_tools:                   # 自动放行；其余调用都弹审批
   - Glob
   - mcp__fusion__fusion_mcp_read
   - Edit(/mech/**)               # 只能自动写自己的目录
-always_ask:                      # 每次都要确认，不能选“一直允许”
+always_ask:                      # 每次都要确认，不能选“一直允许”，任何权限模式下都问
   - mcp__fusion__fusion_mcp_update
+permission_mode: default         # 默认的权限模式，对话时可以切换
 git:
   paths: [mech, handoff, spec]   # 任务结束后自动提交的路径
 ```
@@ -106,7 +152,8 @@ git:
 | `model`、`effort` | 模型和思考力度。机械和电子出错代价高，默认用 Opus 5.5；嵌入式和论文默认 Sonnet 5.5 |
 | `mcp_servers` | 只有这里列出的服务会挂给这个 Agent。项目的 `.mcp.json` 和全局配置都不继承，所以机械 Agent 看不到嘉立创EDA 的工具，论文 Agent 碰不到 Fusion |
 | `allowed_tools` | 自动放行的调用，语法和 Claude Code 的权限规则相同：`Read`、`Bash(pio run -e *)`、`Edit(/mech/**)`、`mcp__服务__工具` |
-| `always_ask` | 每次都必须人工确认的调用，优先于放行规则。默认配置里，Fusion 的写操作、烧录、擦除、装依赖都在这里 |
+| `always_ask` | 每次都必须人工确认的调用，优先于放行规则和任何权限模式。默认配置里，Fusion 的写操作、烧录、擦除、装依赖都在这里 |
+| `permission_mode` | 这个 Agent 默认的权限模式：`default`、`acceptEdits`、`auto`、`plan`、`bypassPermissions` |
 | `disallowed_tools` | 从 Agent 的上下文里移除的工具 |
 | `resource` | 独占资源名。同名资源一次只跑一个任务，跨项目也一样；嵌入式和论文没有独占资源，可以同时跑 |
 | `skills`、`setting_sources` | 启用的技能，以及是否读取用户级的 Claude Code 设置。默认只读项目级的 |
@@ -114,7 +161,7 @@ git:
 | `git.paths`、`git.repo` | 自动提交哪些路径；`repo` 用于 `paper/` 这种独立仓库 |
 | `role: orchestrator` | 总控 Agent：获得 `dispatch`、`list_agents`、`list_handoffs` 三个工具 |
 
-跑顺之后，把低风险的调用从 `always_ask` 挪到 `allowed_tools`，审批会越来越少。
+跑顺之后，把低风险的调用从 `always_ask` 挪到 `allowed_tools`，或者在审批时选“一直允许（写入配置）”，审批会越来越少。
 
 ## 协作方式
 
@@ -154,6 +201,7 @@ npm run update:skill   # 把 vendor/ 里的 EasyEDA API Skill 更新到上游最
 | --- | --- |
 | `src/main/agents/` | 配置解析、SDK 参数翻译与会话执行（`runner.ts`）、调度核心（`manager.ts`）、总控的 dispatch 工具 |
 | `src/main/eda/` | 内置 EasyEDA 技能的安装和桥接服务的启动 |
+| `src/main/updater.ts` | 软件内更新的状态机（electron-updater） |
 | `src/main/store/`、`src/main/settings.ts` | 任务和成本（SQLite，Node 自带的 `node:sqlite`）；项目列表和应用设置 |
 | `src/main/handoff/`、`src/main/git/`、`src/main/workspace/` | 交接单、自动提交、项目模板与 Overleaf |
 | `src/preload/`、`src/shared/` | 界面与主进程之间的接口和共用类型 |
@@ -162,6 +210,6 @@ npm run update:skill   # 把 vendor/ 里的 EasyEDA API Skill 更新到上游最
 | `vendor/easyeda-api-skill/` | 上游技能的快照，来源和版本记在 `vendor/easyeda-api-skill.source.json` |
 | `tests/` | 测试：用假的 SDK 消息流驱动调度核心，不调用 API |
 
-发布新版本：改 `package.json` 里的 `version`，推一个同名的标签（例如 `v0.2.0`），GitHub Actions 会构建安装包、对打包后的应用做一次自检，并创建 Release。
+发布新版本：改 `package.json` 里的 `version`，推一个同名的标签（例如 `v0.3.0`），GitHub Actions 会构建安装包、对打包后的应用做一次自检，并创建 Release。Release 里除了安装包，还会带上 `latest.yml` 和 `.blockmap`，已安装的应用靠它们发现并下载新版本。
 
 应用数据（项目列表、设置、任务与成本数据库、工具调用的审计日志）在 `%APPDATA%\Nexus Agent\`；会话正文由 SDK 存在 `~/.claude/projects/`。

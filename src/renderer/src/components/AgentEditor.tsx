@@ -1,5 +1,7 @@
 import { useState } from 'react'
-import type { AgentConfig, AgentDetail, EffortLevel, McpServerSpec } from '../../../shared/types'
+import type { AgentConfig, AgentDetail, EffortLevel, McpServerSpec, PermissionMode } from '../../../shared/types'
+import { PERMISSION_MODES } from '../../../shared/types'
+import { MODE_HINT, MODE_LABEL } from '../format'
 import { errorText } from '../store'
 
 // Agent 列表与配置：这里改的就是工作区里 .nexus/agents/<id>.yaml 和 .nexus/prompts/<id>.md。
@@ -70,6 +72,7 @@ export function AgentEditor({ detail, isNew, existingIds, templates, templateId,
   const [description, setDescription] = useState(config.description ?? '')
   const [model, setModel] = useState(config.model)
   const [effort, setEffort] = useState<EffortLevel | ''>(config.effort ?? '')
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(config.permission_mode ?? 'default')
   const [role, setRole] = useState<NonNullable<AgentConfig['role']>>(config.role ?? 'specialist')
   const [resource, setResource] = useState(config.resource ?? '')
   const [cwd, setCwd] = useState(config.cwd ?? '')
@@ -107,6 +110,7 @@ export function AgentEditor({ detail, isNew, existingIds, templates, templateId,
       role: role === 'orchestrator' ? 'orchestrator' : undefined,
       model: model.trim(),
       effort: effort || undefined,
+      permission_mode: permissionMode === 'default' ? undefined : permissionMode,
       cwd: cwd.trim() || undefined,
       system_prompt: isNew ? undefined : config.system_prompt,
       mcp_servers: fromRows(mcp),
@@ -232,6 +236,17 @@ export function AgentEditor({ detail, isNew, existingIds, templates, templateId,
               {EFFORTS.map((level) => (
                 <option key={level} value={level}>
                   {level}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="span2">
+            <span className="field-label">默认的权限模式（对话时可以随时用 Shift+Tab 切换）</span>
+            <select className="input" value={permissionMode} onChange={(e) => setPermissionMode(e.target.value as PermissionMode)}>
+              {PERMISSION_MODES.map((value) => (
+                <option key={value} value={value}>
+                  {MODE_LABEL[value]}：{MODE_HINT[value]}
                 </option>
               ))}
             </select>

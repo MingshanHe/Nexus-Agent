@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain, Notification, safeStorage, shell } from 'electron'
+import electronUpdater from 'electron-updater'
 import {
   API_METHODS,
   channelName,
@@ -27,6 +28,7 @@ import {
 } from './handoff/handoffs'
 import { SettingsStore } from './settings'
 import { Store } from './store/db'
+import { UpdateService, type UpdaterLike } from './updater'
 import {
   agentTemplates,
   exportClaudeAgents,
@@ -44,6 +46,8 @@ if (SMOKE) app.setPath('userData', path.join(app.getPath('temp'), `nexus-agent-s
 let mainWindow: BrowserWindow | null = null
 let stopWatching: (() => void) | null = null
 let quitting = false
+/** 正在为安装更新而退出 */
+let updating = false
 
 function send(event: AppEvent): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(EVENT_CHANNEL, event)
@@ -200,6 +204,20 @@ async function start(): Promise<void> {
     },
   })
 
+  // 软件内更新：只有安装版能更新（开发模式和冒烟测试里不启用）
+  const canUpdate = app.isPackaged && !SMOKE
+  const updates = new UpdateService(canUpdate ? (electronUpdater.autoUpdater as unknown as UpdaterLike) : null, {
+    currentVersion: app.getVersion(),
+    supported: canUpdate,
+    onChange: (state) => send({ type: 'update-state', state }),
+    isBusy: () => manager.isBusy(),
+    beforeRestart: () => {
+      // 更新安装是用户点的：不再弹“还有任务在跑”的确认
+      quitting = false
+      updating = true
+    },
+  })
+
   const watch = (): void => {
     stopWatching?.()
     stopWatching = null
@@ -351,6 +369,7 @@ async function start(): Promise<void> {
       interrupt: async (agentId) => manager.interrupt(current(), agentId),
       transcript: async (agentId) => manager.transcript(current(), agentId),
       newSession: async (agentId) => manager.newSession(current(), agentId),
+      setMode: async (agentId, mode) => manager.setMode(current(), agentId, mode),
     },
     sessions: {
       list: async (agentId) => (settings.workspace ? store.listSessions(settings.workspace, agentId) : []),
@@ -378,6 +397,12 @@ async function start(): Promise<void> {
         settings.workspace
           ? store.costSummary(settings.workspace)
           : { totalUsd: 0, allProjectsMonthUsd: 0, monthUsd: 0, todayUsd: 0, taskCount: 0, byAgent: [], byDay: [], recent: [] },
+    },
+    updates: {
+      status: async () => updates.status(),
+      check: async () => updates.check(),
+      install: async () => updates.install(),
+      restart: async () => updates.restart(),
     },
     eda: {
       status: async () => edaStatus(),
@@ -417,7 +442,7 @@ async function start(): Promise<void> {
   mainWindow = createWindow()
   mainWindow.on('close', (event) => {
     // 还有任务在跑：关窗口等于把它们全部中断，先问一句
-    if (quitting || SMOKE || !manager.isBusy() || !mainWindow) return
+    if (quitting || updating || SMOKE || !manager.isBusy() || !mainWindow) return
     const choice = dialog.showMessageBoxSync(mainWindow, {
       type: 'warning',
       buttons: ['继续运行', '中断并退出'],
@@ -433,6 +458,12 @@ async function start(): Promise<void> {
     mainWindow = null
   })
   watch()
+
+  // 启动后过一会儿检查一次更新，之后每 6 小时查一次；只提示，不自动下载
+  if (canUpdate) {
+    setTimeout(() => void updates.check(), 8000)
+    setInterval(() => void updates.check(), 6 * 60 * 60 * 1000).unref()
+  }
 
   app.on('before-quit', (event) => {
     if (quitting) return

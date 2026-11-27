@@ -9,13 +9,15 @@ import type {
   SDKMessage,
   SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk'
-import type {
-  AgentConfig,
-  ApprovalDecision,
-  ApprovalRequest,
-  ChatItem,
-  McpStatus,
-  Question,
+import {
+  PERMISSION_MODES,
+  type AgentConfig,
+  type ApprovalDecision,
+  type ApprovalRequest,
+  type ChatItem,
+  type McpStatus,
+  type PermissionMode,
+  type Question,
 } from '../../shared/types'
 import { firstMatch, formatRule } from './permissions'
 
@@ -28,18 +30,45 @@ const MAX_RESULT_CHARS = 6000
 /** query() 返回值里我们用到的部分；测试里用假的实现替换。 */
 export interface QueryLike extends AsyncIterable<SDKMessage> {
   interrupt(): Promise<unknown>
+  /** 任务进行中切换权限模式；返回实际生效的模式 */
+  setPermissionMode?(mode: PermissionMode): Promise<{ mode?: string } | undefined>
 }
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options?: Options }) => QueryLike
 
 export type ApprovalAsk = Pick<
   ApprovalRequest,
-  'kind' | 'toolName' | 'input' | 'title' | 'description' | 'reason' | 'canAlwaysAllow' | 'alwaysAllowRules' | 'questions'
+  | 'kind'
+  | 'toolName'
+  | 'input'
+  | 'title'
+  | 'description'
+  | 'reason'
+  | 'canAlwaysAllow'
+  | 'alwaysAllowRules'
+  | 'forced'
+  | 'plan'
+  | 'questions'
 >
+
+function asMode(value: unknown): PermissionMode | null {
+  return PERMISSION_MODES.includes(value as PermissionMode) ? (value as PermissionMode) : null
+}
 
 export interface RunCallbacks {
   onChat(item: ChatItem): void
   onDelta(itemId: string, text: string): void
-  onInit(info: { sessionId: string; mcp: McpStatus[]; model: string; apiKeySource: string }): void
+  onInit(info: {
+    sessionId: string
+    mcp: McpStatus[]
+    model: string
+    apiKeySource: string
+    permissionMode: PermissionMode | null
+    slashCommands: string[]
+  }): void
+  /** 会话的权限模式变了（批准计划后切换、自动模式不可用时回退等） */
+  onMode?(mode: PermissionMode): void
+  /** 用户选了“一直允许并写入配置” */
+  onPersistAllow?(rules: string[]): void
   requestApproval(ask: ApprovalAsk, signal: AbortSignal): Promise<ApprovalDecision>
   /** 用户选了“本次会话内一直允许”：这些规则之后的任务也自动放行 */
   onSessionAllow(rules: string[]): void
@@ -58,6 +87,7 @@ export interface RunInput {
   apiKey?: string | null
   /** 本次应用运行期间用户已经选过“一直允许”的规则 */
   sessionAllowed: string[]
+  permissionMode?: PermissionMode
   maxTurns?: number | null
   maxBudgetUsd?: number | null
   extraMcpServers?: Record<string, McpServerConfig>
@@ -83,6 +113,8 @@ export interface TaskHandle {
   /** 任务进行中追加一条指令；任务已经收尾时返回 false */
   send(text: string): boolean
   interrupt(): void
+  /** 任务进行中切换权限模式；成功时返回实际生效的模式，做不到时返回 null（下一个任务再生效） */
+  setMode(mode: PermissionMode): Promise<PermissionMode | null>
 }
 
 /** 可以随时往里塞消息的异步队列，作为 query() 的流式输入。 */
@@ -178,8 +210,8 @@ export function buildOptions(
     mcpServers: { ...toSdkMcpServers(agent), ...(input.extraMcpServers ?? {}) },
     allowedTools: [...new Set([...(agent.allowed_tools ?? []), ...input.sessionAllowed])],
     disallowedTools: agent.disallowed_tools ?? [],
-    // 明确用 default：没自动放行的调用全部进 canUseTool，由人审批
-    permissionMode: 'default',
+    // 默认是 default：没自动放行的调用全部进 canUseTool，由人审批
+    permissionMode: input.permissionMode ?? 'default',
     canUseTool: extras.canUseTool,
     hooks: { PreToolUse: [{ hooks: [extras.preToolUse] }] },
     includePartialMessages: true,
@@ -191,6 +223,8 @@ export function buildOptions(
     // ask 规则排在放行规则之前：命中就一定弹审批
     options.settings = { permissions: { ask: agent.always_ask } }
   }
+  // 全部放行模式要显式打开这个开关；always_ask 的规则在这个模式下仍然会问
+  if (input.permissionMode === 'bypassPermissions') options.allowDangerouslySkipPermissions = true
   if (agent.effort) options.effort = agent.effort
   if (agent.skills) options.skills = agent.skills
   if (input.maxTurns) options.maxTurns = input.maxTurns
@@ -268,13 +302,29 @@ export function startTask(input: RunInput, cb: RunCallbacks): TaskHandle {
     if (toolName === 'AskUserQuestion') {
       const questions = (Array.isArray(toolInput.questions) ? toolInput.questions : []) as Question[]
       const decision = await cb.requestApproval(
-        { kind: 'question', toolName, input: toolInput, questions, canAlwaysAllow: false, alwaysAllowRules: [] },
+        { kind: 'question', toolName, input: toolInput, questions, canAlwaysAllow: false, alwaysAllowRules: [], forced: false },
         opts.signal,
       )
       if (decision.behavior === 'deny') {
         return { behavior: 'deny', message: decision.message || '用户没有回答这个问题。' }
       }
       return { behavior: 'allow', updatedInput: { questions: toolInput.questions, answers: decision.answers ?? {} } }
+    }
+
+    if (toolName === 'ExitPlanMode') {
+      // 计划模式：Agent 写好了计划，等用户批准后才动手
+      const plan = typeof toolInput.plan === 'string' ? toolInput.plan : JSON.stringify(toolInput, null, 2)
+      const decision = await cb.requestApproval(
+        { kind: 'plan', toolName, input: toolInput, plan, canAlwaysAllow: false, alwaysAllowRules: [], forced: false },
+        opts.signal,
+      )
+      if (decision.behavior === 'deny') {
+        return { behavior: 'deny', message: decision.message?.trim() || '用户还不想执行这个计划，请继续完善。' }
+      }
+      const next = asMode(decision.planMode) ?? 'default'
+      const update: PermissionUpdate = { type: 'setMode', mode: next === 'plan' ? 'default' : next, destination: 'session' }
+      cb.onMode?.(next === 'plan' ? 'default' : next)
+      return { behavior: 'allow', updatedInput: toolInput, updatedPermissions: [update] }
     }
 
     const forcedRule = opts.matchedAskRule
@@ -299,6 +349,7 @@ export function startTask(input: RunInput, cb: RunCallbacks): TaskHandle {
         reason: forcedRule ? `配置要求每次确认（${forcedRule}）` : opts.decisionReason,
         canAlwaysAllow,
         alwaysAllowRules: canAlwaysAllow ? rules.map(formatRule) : [],
+        forced: Boolean(forcedRule),
       },
       opts.signal,
     )
@@ -306,8 +357,9 @@ export function startTask(input: RunInput, cb: RunCallbacks): TaskHandle {
     if (decision.behavior === 'deny') {
       return { behavior: 'deny', message: decision.message?.trim() || '用户拒绝了这次操作。' }
     }
-    if (decision.behavior === 'allow_session' && canAlwaysAllow) {
+    if ((decision.behavior === 'allow_session' || decision.behavior === 'allow_always') && canAlwaysAllow) {
       cb.onSessionAllow(rules.map(formatRule))
+      if (decision.behavior === 'allow_always') cb.onPersistAllow?.(rules.map(formatRule))
       const update: PermissionUpdate = { type: 'addRules', rules, behavior: 'allow', destination: 'session' }
       return { behavior: 'allow', updatedInput: toolInput, updatedPermissions: [update] }
     }
@@ -406,14 +458,24 @@ export function startTask(input: RunInput, cb: RunCallbacks): TaskHandle {
         mcp,
         model: String(msg.model ?? agent.model),
         apiKeySource: String(msg.apiKeySource ?? 'none'),
+        permissionMode: asMode(msg.permissionMode),
+        slashCommands: Array.isArray(msg.slash_commands) ? msg.slash_commands.map(String) : [],
       })
+      const started = asMode(msg.permissionMode)
+      if (input.permissionMode === 'auto' && started && started !== 'auto') {
+        system('warn', '自动模式在这个模型或账户上不可用，这次任务按“逐项审批”运行。')
+      }
       for (const server of mcp) {
         if (server.status !== 'connected' && server.status !== 'pending') {
           system('warn', `MCP 服务「${server.name}」没有连上（${server.status}）。相关工具在这次任务里不可用。`)
         }
       }
-    } else if (msg.subtype === 'status' && msg.status === 'compacting') {
-      system('info', '对话太长，正在压缩上下文…')
+    } else if (msg.subtype === 'status') {
+      const mode = asMode(msg.permissionMode)
+      if (mode) cb.onMode?.(mode)
+      if (msg.status === 'compacting') system('info', '正在压缩上下文…')
+    } else if (msg.subtype === 'compact_boundary') {
+      system('info', '上下文已压缩：更早的对话换成了摘要。')
     } else if (msg.subtype === 'api_retry') {
       system('warn', `API 调用失败（${msg.error ?? '未知'}），第 ${msg.attempt}/${msg.max_retries} 次重试…`)
     }
@@ -509,6 +571,18 @@ export function startTask(input: RunInput, cb: RunCallbacks): TaskHandle {
     done: run(),
     send(text: string): boolean {
       return queue.push(userMessage(text))
+    },
+    async setMode(mode: PermissionMode): Promise<PermissionMode | null> {
+      const current = query
+      if (!current?.setPermissionMode || queue.isClosed) return null
+      // 全部放行必须在启动时就声明，任务中途不能切进去
+      if (mode === 'bypassPermissions' && input.permissionMode !== 'bypassPermissions') return null
+      try {
+        const response = await current.setPermissionMode(mode)
+        return asMode(response?.mode) ?? mode
+      } catch {
+        return null
+      }
     },
     interrupt(): void {
       if (interrupted) {

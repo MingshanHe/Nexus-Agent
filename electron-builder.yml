@@ -43,5 +43,10 @@ nsis:
   shortcutName: Nexus Agent
   uninstallDisplayName: Nexus Agent
 
-# 发布由 GitHub Actions 里的 gh release 完成，electron-builder 自己不上传
-publish: null
+# 软件内更新从 GitHub Releases 读 latest.yml。这里的配置只用来生成 latest.yml 和
+# 安装包里的 app-update.yml；上传由 GitHub Actions 里的 gh release 完成（构建时带 --publish never）
+publish:
+  provider: github
+  owner: MingshanHe
+  repo: Nexus-Agent
+  releaseType: release

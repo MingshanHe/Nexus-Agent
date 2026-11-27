@@ -111,6 +111,18 @@ export function Sidebar({ state, onSelect, onView, onNewAgent, onChanged }: Prop
         </button>
       </nav>
       {settings && <div className="version muted">v{settings.appVersion}</div>}
+      {state.update && (state.update.phase === 'available' || state.update.phase === 'downloading' || state.update.phase === 'ready') && (
+        <button
+          className="update-pill"
+          disabled={state.update.phase === 'downloading'}
+          title="下载新版本并重启安装；有任务在跑时，下载完会等你确认再重启"
+          onClick={() => void (state.update?.phase === 'ready' ? window.nexus.updates.restart() : window.nexus.updates.install())}
+        >
+          {state.update.phase === 'available' && `有新版本 ${state.update.latestVersion ?? ''} · 点击更新`}
+          {state.update.phase === 'downloading' && `正在下载 ${state.update.percent}%`}
+          {state.update.phase === 'ready' && '新版本已下载 · 重启安装'}
+        </button>
+      )}
     </aside>
   )
 }

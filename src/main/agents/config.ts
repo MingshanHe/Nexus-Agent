@@ -32,6 +32,7 @@ const agentSchema = z
     role: z.enum(['specialist', 'orchestrator']).optional(),
     model: z.string().min(1),
     effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    permission_mode: z.enum(['default', 'acceptEdits', 'auto', 'plan', 'bypassPermissions']).optional(),
     cwd: z.string().optional(),
     system_prompt: z.string().optional(),
     mcp_servers: z.record(z.string(), mcpServerSchema).optional(),
@@ -212,4 +213,15 @@ export function duplicateAgent(workspace: string, id: string, newId: string): Ag
     system_prompt: `prompts/${newId}.md`,
   }
   return saveAgent(workspace, config, source.prompt)
+}
+
+/** 把规则加进 Agent 的自动放行名单（“一直允许”写入配置）。返回实际新增的规则。 */
+export function addAllowedRules(workspace: string, id: string, rules: string[]): string[] {
+  const detail = getAgent(workspace, id)
+  if (!detail || detail.error) return []
+  const existing = detail.config.allowed_tools ?? []
+  const added = rules.filter((rule) => rule && !existing.includes(rule))
+  if (added.length === 0) return []
+  saveAgent(workspace, { ...detail.config, allowed_tools: [...existing, ...added] }, detail.prompt)
+  return added
 }

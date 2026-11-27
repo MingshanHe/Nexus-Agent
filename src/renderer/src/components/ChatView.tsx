@@ -1,22 +1,39 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
-import type { AgentDetail, AgentRuntimeState, BridgeStatus, ChatItem, McpStatus, SessionInfo } from '../../../shared/types'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import type {
+  AgentDetail,
+  AgentRuntimeState,
+  ApprovalRequest,
+  BridgeStatus,
+  ChatItem,
+  McpStatus,
+  PermissionMode,
+  SessionInfo,
+} from '../../../shared/types'
+import { PERMISSION_MODES } from '../../../shared/types'
 import {
   AGENT_STATUS_LABEL,
+  commandHint,
   dateTime,
   duration,
   MCP_STATUS_LABEL,
+  MODE_CYCLE,
+  MODE_HINT,
+  MODE_LABEL,
   TASK_STATUS_LABEL,
   toolLabel,
   toolSummary,
   usd,
 } from '../format'
 import { errorText } from '../store'
+import { ApprovalCard, DiffBlock } from './ApprovalCard'
 
 interface Props {
   detail: AgentDetail
   runtime: AgentRuntimeState | undefined
   /** null 表示还在向主进程取 */
   items: ChatItem[] | null
+  /** 这个 Agent 正在等你处理的审批 */
+  approvals: ApprovalRequest[]
   taskVersion: number
   hasApiKey: boolean
   onEdit(): void
@@ -107,30 +124,91 @@ function Markdown({ text }: { text: string }) {
   return <div className="md">{blocks}</div>
 }
 
-// ---------- 对话条目 ----------
+// ---------- 工具调用 ----------
 
-function ToolCard({ item }: { item: Extract<ChatItem, { kind: 'tool' }> }) {
+type ToolItem = Extract<ChatItem, { kind: 'tool' }>
+
+function field(input: unknown, key: string): string {
+  const value = input && typeof input === 'object' ? (input as Record<string, unknown>)[key] : undefined
+  return typeof value === 'string' ? value : ''
+}
+
+function lineCount(text: string): number {
+  return text === '' ? 0 : text.split('\n').length
+}
+
+interface Todo {
+  content: string
+  status: string
+}
+
+function todosOf(input: unknown): Todo[] | null {
+  const list = input && typeof input === 'object' ? (input as Record<string, unknown>).todos : undefined
+  if (!Array.isArray(list)) return null
+  return list
+    .filter((t): t is Record<string, unknown> => Boolean(t) && typeof t === 'object')
+    .map((t) => ({ content: String(t.content ?? ''), status: String(t.status ?? 'pending') }))
+}
+
+function ToolCard({ item }: { item: ToolItem }) {
   const [open, setOpen] = useState(false)
-  const summary = toolSummary(item.name, item.input)
   const statusText = item.status === 'running' ? '运行中' : item.status === 'error' ? '失败' : '完成'
+
+  // 待办清单一直展开显示，和 Claude Code 里一样
+  const todos = item.name === 'TodoWrite' ? todosOf(item.input) : null
+  if (todos) {
+    return (
+      <div className="todos">
+        {todos.map((todo, i) => (
+          <div key={i} className={`todo todo-${todo.status}`}>
+            <span className="todo-box" aria-hidden="true">
+              {todo.status === 'completed' ? '✓' : todo.status === 'in_progress' ? '▸' : ''}
+            </span>
+            {todo.content}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  const isEdit = item.name === 'Edit'
+  const isWrite = item.name === 'Write'
+  const isShell = item.name === 'Bash' || item.name === 'PowerShell'
+  const oldText = field(item.input, 'old_string')
+  const newText = isWrite ? field(item.input, 'content') : field(item.input, 'new_string')
+  const summary = isShell ? field(item.input, 'command').replace(/\s+/g, ' ') : toolSummary(item.name, item.input)
+
   return (
     <div className={`tool tool-${item.status}${item.nested ? ' nested' : ''}`}>
       <button className="tool-head" onClick={() => setOpen(!open)} aria-expanded={open}>
         <span className="tool-caret">{open ? '▾' : '▸'}</span>
-        <span className="tool-name">{toolLabel(item.name)}</span>
+        <span className="tool-name">{isShell ? '$' : toolLabel(item.name)}</span>
         <span className="tool-summary">{summary}</span>
+        {(isEdit || isWrite) && (
+          <span className="tool-delta">
+            <span className="plus">+{lineCount(newText)}</span>
+            {isEdit && <span className="minus">−{lineCount(oldText)}</span>}
+          </span>
+        )}
         <span className="tool-status">
           {item.status === 'running' && <i className="spinner" />}
           {statusText}
         </span>
       </button>
+      {/* 失败的调用直接把原因露出来，不用点开 */}
+      {!open && item.status === 'error' && item.result && <div className="tool-error-line">{item.result.split('\n')[0]}</div>}
       {open && (
         <div className="tool-body">
-          <div className="tool-section">参数</div>
-          <pre className="code">{JSON.stringify(item.input, null, 2)}</pre>
+          {isEdit || isWrite ? (
+            <DiffBlock oldText={oldText} newText={newText} />
+          ) : isShell ? (
+            <pre className="code command">{field(item.input, 'command')}</pre>
+          ) : (
+            <pre className="code">{JSON.stringify(item.input, null, 2)}</pre>
+          )}
           {item.result !== undefined && (
             <>
-              <div className="tool-section">结果</div>
+              <div className="tool-section">{isShell ? '输出' : '结果'}</div>
               <pre className="code">{item.result || '（空）'}</pre>
             </>
           )}
@@ -244,23 +322,33 @@ function HistoryDrawer({
 
 // ---------- 主视图 ----------
 
-export function ChatView({ detail, runtime, items, taskVersion, hasApiKey, onEdit, onOpenSettings }: Props) {
+/** 在应用里直接处理、不发给 Agent 的命令 */
+const LOCAL_COMMANDS = ['clear']
+
+export function ChatView({ detail, runtime, items, approvals, taskVersion, hasApiKey, onEdit, onOpenSettings }: Props) {
   const { config, error: configError } = detail
   const [draft, setDraft] = useState('')
   const [notice, setNotice] = useState('')
   const [history, setHistory] = useState(false)
   const [probe, setProbe] = useState<McpStatus[] | null>(null)
+  const [menuIndex, setMenuIndex] = useState(0)
+  /** 按 ↑ 回看之前发过的指令：-1 表示没在回看 */
+  const [recall, setRecall] = useState(-1)
+  const [now, setNow] = useState(Date.now())
   const scroller = useRef<HTMLDivElement>(null)
+  const input = useRef<HTMLTextAreaElement>(null)
   const stick = useRef(true)
 
   const status = runtime?.status ?? 'idle'
   const busy = status === 'running' || status === 'waiting-approval'
+  const mode: PermissionMode = runtime?.permissionMode ?? config.permission_mode ?? 'default'
+  const approval = approvals[0] ?? null
 
   // 没在看旧消息时，新内容进来就跟到底部
   useLayoutEffect(() => {
     const el = scroller.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [items])
+  }, [items, approval?.id])
 
   // 还没跑过任务时，先看一下 MCP 端口通不通
   useEffect(() => {
@@ -272,6 +360,13 @@ export function ChatView({ detail, runtime, items, taskVersion, hasApiKey, onEdi
       cancelled = true
     }
   }, [config.id, config.mcp_servers])
+
+  // 运行中每秒走一下表
+  useEffect(() => {
+    if (!busy) return
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [busy])
 
   const mcp: McpStatus[] = runtime?.mcp.length ? runtime.mcp : (probe ?? [])
 
@@ -302,10 +397,66 @@ export function ChatView({ detail, runtime, items, taskVersion, hasApiKey, onEdi
     }
   }
 
-  const send = async (): Promise<void> => {
-    const text = draft.trim()
+  // 之前发过的指令，最近的在前
+  const sent = useMemo(
+    () => (items ?? []).flatMap((item) => (item.kind === 'user' ? [item.text] : [])).reverse(),
+    [items],
+  )
+  const sessionCost = useMemo(
+    () => (items ?? []).reduce((sum, item) => sum + (item.kind === 'result' ? item.costUsd : 0), 0),
+    [items],
+  )
+
+  // 斜杠命令：输入以 / 开头且还没打空格时给出候选
+  const commands = useMemo(() => {
+    // 会话报上来的列表里技能很多：常用的内置命令排在最前面
+    const names = [...LOCAL_COMMANDS, 'compact', 'context', 'usage', ...(runtime?.slashCommands ?? [])]
+    return [...new Set(names)]
+  }, [runtime?.slashCommands])
+  const slash = /^\/([\w:-]*)$/.exec(draft)
+  const matches = slash ? commands.filter((name) => name.startsWith(slash[1])).slice(0, 8) : []
+  const menuOpen = matches.length > 0
+  const picked = matches[Math.min(menuIndex, matches.length - 1)]
+
+  const setMode = async (next: PermissionMode): Promise<void> => {
+    if (next === 'bypassPermissions' && mode !== 'bypassPermissions') {
+      const ok = window.confirm(
+        `把「${config.name}」切到“全部放行”？\n\n它会不经询问直接执行命令和修改文件。配置里“每次都要确认”的调用仍然会问你。建议只在你信得过当前任务、并且改动都能用 Git 回滚的时候用。`,
+      )
+      if (!ok) return
+    }
+    try {
+      await window.nexus.tasks.setMode(config.id, next)
+      setNotice('')
+    } catch (e) {
+      setNotice(errorText(e))
+    }
+  }
+
+  const cycleMode = (): void => {
+    const index = MODE_CYCLE.indexOf(mode)
+    void setMode(MODE_CYCLE[(index + 1) % MODE_CYCLE.length])
+  }
+
+  const newSession = async (): Promise<void> => {
+    try {
+      await window.nexus.tasks.newSession(config.id)
+      setNotice('')
+    } catch (e) {
+      setNotice(errorText(e))
+    }
+  }
+
+  const send = async (override?: string): Promise<void> => {
+    const text = (override ?? draft).trim()
     if (!text) return
     setNotice('')
+    setRecall(-1)
+    if (text === '/clear') {
+      setDraft('')
+      await newSession()
+      return
+    }
     const result = await window.nexus.tasks.start(config.id, text)
     if (!result.ok) {
       setNotice(result.error ?? '任务没有启动。')
@@ -317,20 +468,58 @@ export function ChatView({ detail, runtime, items, taskVersion, hasApiKey, onEdi
   }
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+    if (event.nativeEvent.isComposing) return
+    if (event.key === 'Tab' && event.shiftKey) {
+      event.preventDefault()
+      cycleMode()
+      return
+    }
+    if (menuOpen) {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault()
+        const step = event.key === 'ArrowDown' ? 1 : -1
+        setMenuIndex((index) => (Math.min(index, matches.length - 1) + step + matches.length) % matches.length)
+        return
+      }
+      if (event.key === 'Tab') {
+        event.preventDefault()
+        setDraft(`/${picked}`)
+        return
+      }
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault()
+        void send(`/${picked}`)
+        return
+      }
+    }
+    if (event.key === 'Escape') {
+      if (draft) setDraft('')
+      else if (busy) void window.nexus.tasks.interrupt(config.id)
+      setRecall(-1)
+      return
+    }
+    // ↑ 回看之前发过的指令（输入框为空，或者正在回看时）
+    if (event.key === 'ArrowUp' && (draft === '' || recall >= 0) && sent.length > 0) {
+      event.preventDefault()
+      const next = Math.min(recall + 1, sent.length - 1)
+      setRecall(next)
+      setDraft(sent[next])
+      return
+    }
+    if (event.key === 'ArrowDown' && recall >= 0) {
+      event.preventDefault()
+      const next = recall - 1
+      setRecall(next)
+      setDraft(next >= 0 ? sent[next] : '')
+      return
+    }
+    if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       void send()
     }
   }
 
-  const newSession = async (): Promise<void> => {
-    try {
-      await window.nexus.tasks.newSession(config.id)
-      setNotice('')
-    } catch (e) {
-      setNotice(errorText(e))
-    }
-  }
+  const elapsed = runtime?.runningSince ? duration(Math.max(0, now - runtime.runningSince)) : ''
 
   return (
     <section className="chat">
@@ -344,11 +533,7 @@ export function ChatView({ detail, runtime, items, taskVersion, hasApiKey, onEdi
           {config.model && <span className="pill mono">{runtime?.model ?? config.model}</span>}
           {config.resource && <span className="pill" title="同名独占资源一次只跑一个任务">独占 {config.resource}</span>}
           {mcp.map((server) => (
-            <span
-              key={server.name}
-              className={`pill mcp mcp-${server.status}`}
-              title={server.error ?? `MCP 服务 ${server.name}`}
-            >
+            <span key={server.name} className={`pill mcp mcp-${server.status}`} title={server.error ?? `MCP 服务 ${server.name}`}>
               <i className="dot" />
               {server.name} {MCP_STATUS_LABEL[server.status] ?? server.status}
             </span>
@@ -421,11 +606,19 @@ export function ChatView({ detail, runtime, items, taskVersion, hasApiKey, onEdi
             <div className="hint">
               <p>给「{config.name}」派一件事。</p>
               <p className="muted">
-                没有自动放行的调用会弹窗让你审批。任务结束后自动提交一次 Git，提交信息以 [{config.id}] 开头。
+                输入框下面可以切换权限模式（Shift+Tab）：逐项审批、自动接受编辑、自动模式、计划模式。输入 / 可以看到可用的命令。
               </p>
             </div>
           )}
           {items?.map((item) => <Item key={item.id} item={item} />)}
+          {approval && <ApprovalCard key={approval.id} request={approval} total={approvals.length} stealFocus={draft === ''} />}
+          {busy && !approval && (
+            <div className="working">
+              <i className="spinner" />
+              正在工作{elapsed ? ` · ${elapsed}` : ''}
+              <span className="muted"> · 按 Esc 中断，也可以直接输入追加指令</span>
+            </div>
+          )}
         </div>
         {history && (
           <HistoryDrawer agentId={config.id} busy={busy || status === 'queued'} taskVersion={taskVersion} onClose={() => setHistory(false)} />
@@ -442,25 +635,66 @@ export function ChatView({ detail, runtime, items, taskVersion, hasApiKey, onEdi
           </div>
         )}
         {notice && <div className="note note-info">{notice}</div>}
-        <div className="composer-row">
+        <div className="composer-box">
+          {menuOpen && (
+            <div className="slash-menu" role="listbox" aria-label="命令">
+              {matches.map((name, index) => (
+                <button
+                  key={name}
+                  role="option"
+                  aria-selected={name === picked}
+                  className={name === picked ? 'active' : ''}
+                  onMouseEnter={() => setMenuIndex(index)}
+                  onClick={() => {
+                    void send(`/${name}`)
+                    input.current?.focus()
+                  }}
+                >
+                  <span className="mono">/{name}</span>
+                  <span className="muted">{commandHint(name)}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <textarea
+            ref={input}
             value={draft}
             rows={3}
-            placeholder={busy ? '任务进行中：这里输入的内容会作为追加指令发给它（Enter 发送）' : '描述要做的事（Enter 发送，Shift+Enter 换行）'}
-            onChange={(event) => setDraft(event.target.value)}
+            placeholder={busy ? '任务进行中：输入的内容会作为追加指令发给它' : '描述要做的事，或输入 / 查看命令'}
+            onChange={(event) => {
+              setDraft(event.target.value)
+              setMenuIndex(0)
+              if (recall >= 0) setRecall(-1)
+            }}
             onKeyDown={onKeyDown}
             disabled={Boolean(configError)}
           />
-          <div className="composer-buttons">
-            <button className="btn primary" disabled={!draft.trim() || Boolean(configError)} onClick={() => void send()}>
-              {busy ? '追加' : '发送'}
-            </button>
+          <div className="composer-bar">
+            <label className={`mode mode-${mode}`} title={`${MODE_HINT[mode]}（Shift+Tab 切换）`}>
+              <span className="mode-dot" aria-hidden="true" />
+              <select value={mode} aria-label="权限模式" onChange={(event) => void setMode(event.target.value as PermissionMode)}>
+                {PERMISSION_MODES.map((value) => (
+                  <option key={value} value={value}>
+                    {MODE_LABEL[value]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span className="composer-hint muted">{MODE_HINT[mode]}</span>
+            <span className="spacer" />
+            {sessionCost > 0 && <span className="muted composer-cost">本会话 {usd(sessionCost)}</span>}
             {busy && (
-              <button className="btn danger" onClick={() => void window.nexus.tasks.interrupt(config.id)}>
+              <button className="btn small danger" onClick={() => void window.nexus.tasks.interrupt(config.id)}>
                 中断
               </button>
             )}
+            <button className="btn small primary" disabled={!draft.trim() || Boolean(configError)} onClick={() => void send()}>
+              {busy ? '追加' : '发送'}
+            </button>
           </div>
+        </div>
+        <div className="keys muted">
+          Enter 发送 · Shift+Enter 换行 · Shift+Tab 切换权限模式 · ↑ 上一条指令 · Esc 中断
         </div>
       </footer>
     </section>

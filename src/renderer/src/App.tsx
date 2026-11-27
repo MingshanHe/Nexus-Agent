@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react'
-import type { AgentConfig, AgentDetail } from '../../shared/types'
+import type { AgentConfig, AgentDetail, ApprovalRequest } from '../../shared/types'
 import { AgentEditor } from './components/AgentEditor'
-import { ApprovalDialog } from './components/ApprovalDialog'
 import { ChatView } from './components/ChatView'
 import { CostPanel } from './components/CostPanel'
 import { HandoffBoard } from './components/HandoffBoard'
 import { ProjectsPanel } from './components/ProjectsPanel'
 import { SettingsPanel } from './components/SettingsPanel'
 import { Sidebar } from './components/Sidebar'
+import { toolLabel } from './format'
 import { useNexus } from './store'
 
 const BLANK_AGENT: AgentConfig = {
@@ -55,6 +55,23 @@ export function App() {
     editingDetail = state.agents.find((a) => a.config.id === editing) ?? null
   }
 
+  // 审批直接显示在对应 Agent 的对话里；不在眼前的那些，在顶部给一条可以点过去的提示
+  const sameDir = (a: string, b: string | null): boolean => Boolean(b) && a.toLowerCase() === (b as string).toLowerCase()
+  const visible = (request: ApprovalRequest): boolean =>
+    state.view === 'chat' && request.agentId === selected?.config.id && sameDir(request.workspace, state.settings?.workspace ?? null)
+  const here = state.approvals.filter(visible)
+  const elsewhere = state.approvals.filter((request) => !visible(request))
+
+  const goToApproval = async (request: ApprovalRequest): Promise<void> => {
+    if (!sameDir(request.workspace, state.settings?.workspace ?? null)) {
+      const project = state.settings?.projects.find((p) => sameDir(request.workspace, p.path))
+      if (!project) return
+      await window.nexus.projects.open(project.id)
+      await reload()
+    }
+    select(request.agentId)
+  }
+
   const startNewAgent = (): void => {
     setTemplateId('')
     setEditing('new')
@@ -64,6 +81,20 @@ export function App() {
     <div className="app">
       <Sidebar state={state} onSelect={select} onView={setView} onNewAgent={startNewAgent} onChanged={reload} />
       <main className="main">
+        {elsewhere.length > 0 && (
+          <div className="pending-strip" role="status">
+            <strong>{elsewhere.length} 个审批在等你</strong>
+            {elsewhere.slice(0, 3).map((request) => (
+              <button key={request.id} className="btn small" onClick={() => void goToApproval(request)}>
+                {state.settings && state.settings.projects.length > 1
+                  ? `${projectNames[request.workspace.toLowerCase()] ?? ''} · `
+                  : ''}
+                {request.agentName}：{request.kind === 'question' ? '有问题要问你' : request.kind === 'plan' ? '计划待批准' : toolLabel(request.toolName)}
+              </button>
+            ))}
+            {elsewhere.length > 3 && <span className="muted">还有 {elsewhere.length - 3} 个</span>}
+          </div>
+        )}
         {state.view === 'chat' &&
           (selected ? (
             <ChatView
@@ -71,6 +102,7 @@ export function App() {
               detail={selected}
               runtime={state.states[selected.config.id]}
               items={state.transcripts[selected.config.id] ?? null}
+              approvals={here}
               taskVersion={state.taskVersion}
               hasApiKey={state.settings.hasApiKey}
               onEdit={() => setEditing(selected.config.id)}
@@ -107,6 +139,7 @@ export function App() {
           <SettingsPanel
             key={state.settings.currentProjectId ?? 'none'}
             settings={state.settings}
+            update={state.update}
             workspace={state.workspace}
             onChanged={reload}
           />
@@ -130,19 +163,6 @@ export function App() {
         />
       )}
 
-      {state.approvals.length > 0 && (
-        <ApprovalDialog
-          key={state.approvals[0].id}
-          request={state.approvals[0]}
-          projectName={
-            state.settings.projects.length > 1
-              ? (projectNames[state.approvals[0].workspace.toLowerCase()] ?? state.approvals[0].workspace)
-              : null
-          }
-          position={1}
-          total={state.approvals.length}
-        />
-      )}
     </div>
   )
 }

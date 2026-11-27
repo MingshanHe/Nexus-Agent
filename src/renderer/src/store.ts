@@ -7,6 +7,7 @@ import type {
   ApprovalRequest,
   ChatItem,
   Handoff,
+  UpdateState,
   WorkspaceStatus,
 } from '../../shared/types'
 
@@ -22,6 +23,7 @@ export interface UiState {
   transcripts: Record<string, ChatItem[]>
   approvals: ApprovalRequest[]
   handoffs: Handoff[]
+  update: UpdateState | null
   selectedAgentId: string | null
   view: View
   /** 任务状态每变一次加一，成本和历史面板据此刷新 */
@@ -37,6 +39,7 @@ type Action =
       states: AgentRuntimeState[]
       approvals: ApprovalRequest[]
       handoffs: Handoff[]
+      update: UpdateState
     }
   | { type: 'event'; event: AppEvent }
   | { type: 'transcript'; agentId: string; items: ChatItem[] }
@@ -52,6 +55,7 @@ const initial: UiState = {
   transcripts: {},
   approvals: [],
   handoffs: [],
+  update: null,
   selectedAgentId: null,
   view: 'chat',
   taskVersion: 0,
@@ -105,6 +109,8 @@ function applyEvent(state: UiState, event: AppEvent): UiState {
       return { ...state, approvals: state.approvals.filter((a) => a.id !== event.id) }
     case 'handoffs-changed':
       return { ...state, handoffs: event.handoffs }
+    case 'update-state':
+      return { ...state, update: event.state }
     case 'task-updated':
       return { ...state, taskVersion: state.taskVersion + 1 }
     default:
@@ -130,6 +136,7 @@ function reducer(state: UiState, action: Action): UiState {
         states: Object.fromEntries(action.states.map((s) => [s.agentId, s])),
         approvals: action.approvals,
         handoffs: action.handoffs,
+        update: action.update,
         selectedAgentId: selected,
         view: !action.settings.workspace ? 'projects' : switched && state.ready ? 'chat' : state.view,
       }
@@ -158,15 +165,16 @@ export function useNexus() {
 
   const reload = useCallback(async () => {
     const api = window.nexus
-    const [settings, workspace, agents, states, approvals, handoffs] = await Promise.all([
+    const [settings, workspace, agents, states, approvals, handoffs, update] = await Promise.all([
       api.settings.get(),
       api.workspace.status(),
       api.agents.list(),
       api.agents.states(),
       api.approvals.pending(),
       api.handoffs.list(),
+      api.updates.status(),
     ])
-    dispatch({ type: 'loaded', settings, workspace, agents, states, approvals, handoffs })
+    dispatch({ type: 'loaded', settings, workspace, agents, states, approvals, handoffs, update })
   }, [])
 
   useEffect(() => {

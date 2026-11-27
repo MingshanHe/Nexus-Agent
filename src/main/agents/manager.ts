@@ -9,13 +9,14 @@ import type {
   ApprovalRequest,
   ChatItem,
   McpStatus,
+  PermissionMode,
   StartTaskResult,
   TaskOrigin,
   TaskRecord,
 } from '../../shared/types'
 import { autoCommit, commitMessage, isRepoRoot } from '../git/git'
 import { taskCostFromReported, type Store } from '../store/db'
-import { getAgent, listAgents, resolveAgentCwd } from './config'
+import { addAllowedRules, getAgent, listAgents, resolveAgentCwd } from './config'
 import { startTask, type ApprovalAsk, type QueryFn, type RunOutcome, type TaskHandle } from './runner'
 
 // 调度核心：谁在跑、谁在排队、谁在等审批。保持薄——Agent 循环、工具、会话都是 SDK 的。
@@ -77,7 +78,15 @@ interface Runtime {
   queue: QueuedTask[]
   /** 正在跑的任务占用的独占资源 */
   holding: string | null
+  /** 配置文件里这个 Agent 的默认权限模式 */
+  defaultMode: PermissionMode
+  /** 用户在对话里切换过的模式；只在本次应用运行期间有效 */
+  modeOverride: PermissionMode | null
+  slashCommands: string[]
+  runningSince: number | null
 }
+
+const DEFAULT_SLASH_COMMANDS = ['compact', 'context', 'usage']
 
 interface PendingApproval {
   request: ApprovalRequest
@@ -122,6 +131,10 @@ export class AgentManager {
         sessionAllowed: new Set(),
         queue: [],
         holding: null,
+        defaultMode: getAgent(workspace, agentId)?.config.permission_mode ?? 'default',
+        modeOverride: null,
+        slashCommands: DEFAULT_SLASH_COMMANDS,
+        runningSince: null,
       }
       this.runtimes.set(key, rt)
     }
@@ -139,6 +152,9 @@ export class AgentManager {
       mcp: rt.mcp,
       model: rt.model,
       apiKeySource: rt.apiKeySource,
+      permissionMode: rt.modeOverride ?? rt.defaultMode,
+      slashCommands: rt.slashCommands,
+      runningSince: rt.handle || rt.starting ? (rt.current?.startedAt ?? null) : null,
     }
   }
 
@@ -147,7 +163,32 @@ export class AgentManager {
   }
 
   states(workspace: string): AgentRuntimeState[] {
-    return listAgents(workspace).map((detail) => this.stateOf(this.runtime(workspace, detail.config.id)))
+    return listAgents(workspace).map((detail) => {
+      const rt = this.runtime(workspace, detail.config.id)
+      // 配置文件可能刚被改过：默认模式以文件为准
+      rt.defaultMode = detail.config.permission_mode ?? 'default'
+      return this.stateOf(rt)
+    })
+  }
+
+  /**
+   * 切换权限模式。任务进行中会立刻对后面的调用生效；
+   * 做不到时（例如中途切到全部放行）从下一个任务开始生效。
+   */
+  async setMode(workspace: string, agentId: string, mode: PermissionMode): Promise<PermissionMode> {
+    const rt = this.runtime(workspace, agentId)
+    rt.modeOverride = mode
+    if (rt.handle) {
+      const applied = await rt.handle.setMode(mode)
+      if (applied === null) {
+        this.note(rt, 'info', '这个模式从下一个任务开始生效。')
+      } else if (applied !== mode) {
+        rt.modeOverride = applied
+        this.note(rt, 'warn', '这个模式现在不可用，已保持原来的模式。')
+      }
+    }
+    this.emitState(rt)
+    return rt.modeOverride ?? rt.defaultMode
   }
 
   /** 正在运行、准备中或排队的任务数；不传项目就是全部项目。 */
@@ -384,6 +425,7 @@ export class AgentManager {
     rt.starting = true
     rt.status = 'running'
     rt.holding = config.resource ?? null
+    rt.defaultMode = config.permission_mode ?? 'default'
     this.deps.store.upsertTask(task)
     this.deps.emit({ type: 'task-updated', task })
     this.emitState(rt)
@@ -411,6 +453,7 @@ export class AgentManager {
           fork,
           apiKey: settings.apiKey,
           sessionAllowed: [...rt.sessionAllowed],
+          permissionMode: rt.modeOverride ?? rt.defaultMode,
           maxTurns: config.max_turns ?? settings.defaultMaxTurns,
           maxBudgetUsd: config.max_budget_usd ?? settings.defaultMaxBudgetUsd,
           extraMcpServers:
@@ -429,6 +472,11 @@ export class AgentManager {
             rt.mcp = info.mcp
             rt.model = info.model
             rt.apiKeySource = info.apiKeySource
+            if (info.slashCommands.length > 0) rt.slashCommands = info.slashCommands
+            // 要了自动模式却没拿到（模型或账户不支持）：界面上如实显示
+            if (info.permissionMode && info.permissionMode !== (rt.modeOverride ?? rt.defaultMode)) {
+              rt.modeOverride = info.permissionMode
+            }
             task.sessionId = info.sessionId
             this.deps.store.touchSession({
               sessionId: info.sessionId,
@@ -444,6 +492,21 @@ export class AgentManager {
           requestApproval: (ask, signal) => this.requestApproval(rt, config, task, ask, signal),
           onSessionAllow: (rules) => {
             for (const rule of rules) rt.sessionAllowed.add(rule)
+          },
+          onMode: (mode) => {
+            rt.modeOverride = mode
+            this.emitState(rt)
+          },
+          onPersistAllow: (rules) => {
+            try {
+              const added = addAllowedRules(workspace, config.id, rules)
+              if (added.length > 0) {
+                this.note(rt, 'info', `已写入配置的自动放行名单：${added.join('、')}`)
+                this.deps.emit({ type: 'agents-changed' })
+              }
+            } catch (error) {
+              this.note(rt, 'warn', `规则没有写进配置：${error instanceof Error ? error.message : String(error)}`)
+            }
           },
           onToolCall: (tool, input) => {
             this.deps.audit?.({ ts: Date.now(), workspace, agentId: config.id, taskId: task.id, tool, input })

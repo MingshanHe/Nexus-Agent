@@ -1,9 +1,10 @@
 import { useState } from 'react'
-import type { AppSettings, GitResult, WorkspaceStatus } from '../../../shared/types'
+import type { AppSettings, GitResult, UpdateState, WorkspaceStatus } from '../../../shared/types'
 import { errorText } from '../store'
 
 interface Props {
   settings: AppSettings
+  update: UpdateState | null
   workspace: WorkspaceStatus
   onChanged(): Promise<void>
 }
@@ -13,7 +14,18 @@ function numberOrNull(text: string): number | null {
   return text.trim() !== '' && Number.isFinite(value) && value > 0 ? value : null
 }
 
-export function SettingsPanel({ settings, workspace, onChanged }: Props) {
+const UPDATE_TEXT: Record<UpdateState['phase'], string> = {
+  unsupported: '这个版本不是用安装包装的（开发模式），不能在软件内更新',
+  idle: '还没有检查过',
+  checking: '正在检查…',
+  'up-to-date': '已经是最新版本',
+  available: '有新版本',
+  downloading: '正在下载',
+  ready: '新版本已经下载好',
+  error: '检查或下载时出错',
+}
+
+export function SettingsPanel({ settings, update, workspace, onChanged }: Props) {
   const [message, setMessage] = useState<{ level: 'info' | 'error'; text: string } | null>(null)
   const [apiKey, setApiKey] = useState('')
   const [taskBudget, setTaskBudget] = useState(settings.defaultMaxBudgetUsd?.toString() ?? '')
@@ -232,6 +244,52 @@ export function SettingsPanel({ settings, workspace, onChanged }: Props) {
           </button>
         </div>
         {gitOutput && <pre className={`code ${gitOutput.ok ? '' : 'diff-del'}`}>{gitOutput.output || (gitOutput.ok ? '完成。' : '失败。')}</pre>}
+      </div>
+
+      <div className="panel">
+        <div className="panel-title">
+          <strong>5. 软件更新</strong>
+          <span className="muted">从 GitHub Releases 下载，装完自动重新打开</span>
+        </div>
+        <div className="kv">
+          <span>当前</span>
+          <span className="mono">v{settings.appVersion}</span>
+          <span>状态</span>
+          <span>
+            {update ? UPDATE_TEXT[update.phase] : '—'}
+            {update?.phase === 'available' && update.latestVersion ? ` v${update.latestVersion}` : ''}
+            {update?.phase === 'downloading' ? ` ${update.percent}%` : ''}
+            {update?.error ? `：${update.error}` : ''}
+          </span>
+        </div>
+        {update?.phase === 'downloading' && (
+          <div className="meter" role="img" aria-label={`下载进度 ${update.percent}%`}>
+            <div className="meter-fill" style={{ width: `${update.percent}%` }} />
+          </div>
+        )}
+        {update?.notes && (update.phase === 'available' || update.phase === 'ready') && <pre className="code">{update.notes}</pre>}
+        <div className="form-actions left">
+          <button
+            className="btn"
+            disabled={!update || update.phase === 'unsupported' || update.phase === 'checking' || update.phase === 'downloading'}
+            onClick={() => void window.nexus.updates.check()}
+          >
+            检查更新
+          </button>
+          {update && (update.phase === 'available' || update.phase === 'downloading') && (
+            <button className="btn primary" disabled={update.phase === 'downloading'} onClick={() => void window.nexus.updates.install()}>
+              {update.phase === 'downloading' ? '正在下载…' : '更新并重启'}
+            </button>
+          )}
+          {update?.phase === 'ready' && (
+            <button className="btn primary" onClick={() => void window.nexus.updates.restart()}>
+              重启并安装
+            </button>
+          )}
+        </div>
+        <p className="muted small">
+          点“更新并重启”后会下载新版本；下载完如果没有任务在跑就自动重启安装，有任务在跑则等你点“重启并安装”。
+        </p>
       </div>
 
       <div className="panel">

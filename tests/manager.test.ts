@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { saveAgent } from '../src/main/agents/config'
+import { getAgent, saveAgent } from '../src/main/agents/config'
 import { AgentManager, type ManagerDeps, type ManagerSettings } from '../src/main/agents/manager'
 import { buildOptions, childEnv, type QueryFn, type QueryLike } from '../src/main/agents/runner'
 import { git } from '../src/main/git/git'
@@ -28,7 +28,7 @@ interface ScriptContext {
 }
 type Script = (ctx: ScriptContext) => AsyncGenerator<Record<string, unknown>>
 
-function fakeQuery(script: Script, calls: Options[] = []): QueryFn {
+function fakeQuery(script: Script, calls: Options[] = [], modeLog: string[] = []): QueryFn {
   return ({ prompt, options }) => {
     calls.push(options ?? {})
     const input = prompt[Symbol.asyncIterator]()
@@ -48,6 +48,11 @@ function fakeQuery(script: Script, calls: Options[] = []): QueryFn {
     return Object.assign(generator, {
       interrupt: async () => {
         interrupt()
+      },
+      setPermissionMode: async (mode: string) => {
+        if (mode === 'auto' && modeLog.includes('no-auto')) throw new Error('auto mode unavailable')
+        modeLog.push(mode)
+        return { mode }
       },
     }) as QueryLike
   }
@@ -674,5 +679,155 @@ describe('多个项目', () => {
     expect(elecNotes).toContain('已把内置的技能装进这个项目。')
     expect(paperNotes.some((text) => text.includes('磁盘满了'))).toBe(true)
     expect(tasks().every((t) => t.status === 'done')).toBe(true)
+  })
+})
+
+describe('权限模式（和 Claude Code 一致）', () => {
+  const approvals = (): ApprovalRequest[] => events.flatMap((e) => (e.type === 'approval-request' ? [e.request] : []))
+  const modeOf = (manager: AgentManager, id: string): string | undefined => manager.states(workspace).find((s) => s.agentId === id)?.permissionMode
+
+  it('默认逐项审批；切换后的模式传给 SDK；配置文件里可以写默认模式', async () => {
+    const calls: Options[] = []
+    const manager = makeManager(
+      fakeQuery(async function* (ctx) {
+        await ctx.nextUserText()
+        yield { ...init('s1'), permissionMode: ctx.options.permissionMode, slash_commands: ['compact', 'context', 'usage', 'verify'] }
+        yield result('s1', 0.1)
+      }, calls),
+    )
+    expect(modeOf(manager, 'paper')).toBe('default')
+    manager.submit(workspace, 'paper', '第一件事', 'user')
+    await until(finished(1), '第一个任务')
+    expect(calls[0].permissionMode).toBe('default')
+    expect(calls[0].allowDangerouslySkipPermissions).toBeUndefined()
+    expect(manager.states(workspace).find((s) => s.agentId === 'paper')?.slashCommands).toContain('verify')
+
+    expect(await manager.setMode(workspace, 'paper', 'acceptEdits')).toBe('acceptEdits')
+    manager.submit(workspace, 'paper', '第二件事', 'user')
+    await until(finished(2), '第二个任务')
+    expect(calls[1].permissionMode).toBe('acceptEdits')
+
+    await manager.setMode(workspace, 'paper', 'bypassPermissions')
+    manager.submit(workspace, 'paper', '第三件事', 'user')
+    await until(finished(3), '第三个任务')
+    expect(calls[2]).toMatchObject({ permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true })
+    // 全部放行时，“每次都要确认”的规则仍然交给 SDK 的 ask 规则
+    expect(calls[2].settings).toEqual({ permissions: { ask: ['Bash(*git push*)', 'PowerShell(*git push*)'] } })
+
+    const firmware = getAgent(workspace, 'firmware')
+    saveAgent(workspace, { ...(firmware?.config ?? { id: 'firmware', name: '', model: '' }), permission_mode: 'plan' }, firmware?.prompt ?? '')
+    expect(modeOf(manager, 'firmware')).toBe('plan')
+    manager.submit(workspace, 'firmware', '重构驱动', 'user')
+    await until(finished(4), '第四个任务')
+    expect(calls[3].permissionMode).toBe('plan')
+  })
+
+  it('任务进行中切换模式立刻生效；中途不能切进全部放行，留到下一个任务', async () => {
+    const modeLog: string[] = []
+    let release: () => void = () => undefined
+    const manager = makeManager(
+      fakeQuery(async function* (ctx) {
+        await ctx.nextUserText()
+        yield init('s1')
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        yield result('s1', 0.1)
+      }, [], modeLog),
+    )
+    manager.submit(workspace, 'firmware', '改驱动', 'user')
+    await until(() => manager.states(workspace).some((s) => s.agentId === 'firmware' && s.runningSince !== null && s.sessionId === 's1'), '开始运行')
+    expect(await manager.setMode(workspace, 'firmware', 'acceptEdits')).toBe('acceptEdits')
+    expect(modeLog).toEqual(['acceptEdits'])
+
+    expect(await manager.setMode(workspace, 'firmware', 'bypassPermissions')).toBe('bypassPermissions')
+    expect(modeLog).toEqual(['acceptEdits'])
+    const notes = (await manager.transcript(workspace, 'firmware')).flatMap((i) => (i.kind === 'system' ? [i.text] : []))
+    expect(notes.some((text) => text.includes('下一个任务'))).toBe(true)
+    release()
+    await until(finished(1), '任务结束')
+  })
+
+  it('要了自动模式但会话没拿到：界面如实显示回退后的模式', async () => {
+    const manager = makeManager(
+      fakeQuery(async function* (ctx) {
+        await ctx.nextUserText()
+        yield { ...init('s1'), permissionMode: 'default' }
+        yield result('s1', 0.1)
+      }),
+    )
+    await manager.setMode(workspace, 'paper', 'auto')
+    manager.submit(workspace, 'paper', '写一段', 'user')
+    await until(finished(1), '任务结束')
+    expect(modeOf(manager, 'paper')).toBe('default')
+    const notes = (await manager.transcript(workspace, 'paper')).flatMap((i) => (i.kind === 'system' ? [i.text] : []))
+    expect(notes.some((text) => text.includes('自动模式') && text.includes('不可用'))).toBe(true)
+  })
+
+  it('计划模式：计划交给用户批准，批准后切到选定的模式；不批准就把意见传回去', async () => {
+    const outcomes: unknown[] = []
+    const manager = makeManager(
+      fakeQuery(async function* (ctx) {
+        await ctx.nextUserText()
+        yield init('s1')
+        const signal = new AbortController().signal
+        outcomes.push(await ctx.options.canUseTool?.('ExitPlanMode', { plan: '1. 改引脚\n2. 编译' }, { signal, toolUseID: 'p1', requestId: 'r1' }))
+        outcomes.push(await ctx.options.canUseTool?.('ExitPlanMode', { plan: '1. 改引脚\n2. 编译\n3. 写交接单' }, { signal, toolUseID: 'p2', requestId: 'r2' }))
+        yield result('s1', 0.1)
+      }),
+    )
+    await manager.setMode(workspace, 'firmware', 'plan')
+    manager.submit(workspace, 'firmware', '按交接单改 IMU 引脚', 'user')
+    await until(() => approvals().length === 1, '第一版计划')
+    expect(approvals()[0]).toMatchObject({ kind: 'plan', plan: '1. 改引脚\n2. 编译', canAlwaysAllow: false })
+    manager.resolveApproval({ id: approvals()[0].id, behavior: 'deny', message: '还要写交接单' })
+    await until(() => approvals().length === 2, '第二版计划')
+    manager.resolveApproval({ id: approvals()[1].id, behavior: 'allow', planMode: 'acceptEdits' })
+    await until(finished(1), '任务结束')
+
+    expect(outcomes[0]).toEqual({ behavior: 'deny', message: '还要写交接单' })
+    expect(outcomes[1]).toMatchObject({
+      behavior: 'allow',
+      updatedPermissions: [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }],
+    })
+    expect(modeOf(manager, 'firmware')).toBe('acceptEdits')
+  })
+
+  it('“一直允许并写入配置”：规则进了配置文件，下一个任务也自动放行；强制确认的调用标记为 forced', async () => {
+    const calls: Options[] = []
+    const manager = makeManager(
+      fakeQuery(async function* (ctx) {
+        const text = await ctx.nextUserText()
+        yield init('s1')
+        if (text === '跑测试') {
+          const signal = new AbortController().signal
+          await ctx.options.canUseTool?.('Bash', { command: 'pio test -e esp32dev' }, {
+            signal,
+            toolUseID: 'a',
+            requestId: 'r1',
+            suggestions: [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'pio test:*' }], behavior: 'allow', destination: 'localSettings' }],
+          })
+          await ctx.options.canUseTool?.('Bash', { command: 'pio run -t upload' }, { signal, toolUseID: 'b', requestId: 'r2' })
+        }
+        yield result('s1', 0.1)
+      }, calls),
+    )
+    manager.submit(workspace, 'firmware', '跑测试', 'user')
+    await until(() => approvals().length === 1, '第一个审批')
+    expect(approvals()[0]).toMatchObject({ forced: false, canAlwaysAllow: true })
+    manager.resolveApproval({ id: approvals()[0].id, behavior: 'allow_always' })
+    await until(() => approvals().length === 2, '第二个审批')
+    expect(approvals()[1]).toMatchObject({ forced: true, canAlwaysAllow: false })
+    // 强制确认的调用即使选了“一直允许”也只放行这一次
+    manager.resolveApproval({ id: approvals()[1].id, behavior: 'allow_always' })
+    await until(finished(1), '任务结束')
+
+    const saved = getAgent(workspace, 'firmware')?.config.allowed_tools ?? []
+    expect(saved).toContain('Bash(pio test:*)')
+    expect(saved.filter((rule) => rule.includes('upload'))).toEqual([])
+    expect(events.some((e) => e.type === 'agents-changed')).toBe(true)
+    manager.submit(workspace, 'firmware', '再来一次', 'user')
+    await until(finished(2), '第二个任务')
+    expect(calls[1].allowedTools).toContain('Bash(pio test:*)')
   })
 })

@@ -45,11 +45,26 @@ jobs:
           $process = Start-Process -FilePath $exe -ArgumentList '--smoke' -PassThru -Wait
           if ($process.ExitCode -ne 0) { throw "Smoke test failed with exit code $($process.ExitCode)" }
 
+      # 软件内更新靠 latest.yml 发现新版本、靠 blockmap 做差分下载：每次构建都确认它们生成了，版本也对得上
+      - name: Check update metadata
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if (-not (Test-Path release/latest.yml)) { throw 'release/latest.yml was not generated' }
+          $latest = Get-Content release/latest.yml -Raw
+          Write-Host $latest
+          if ($latest -notmatch "(?m)^version: $([regex]::Escape($version))\s*$") { throw "latest.yml does not describe version $version" }
+          if ($latest -notmatch "Nexus-Agent-Setup-$([regex]::Escape($version))\.exe") { throw 'latest.yml does not point at the installer' }
+          if (-not (Test-Path "release/Nexus-Agent-Setup-$version.exe.blockmap")) { throw 'installer blockmap is missing' }
+          if (-not (Test-Path 'release/win-unpacked/resources/app-update.yml')) { throw 'app-update.yml is missing from the packaged app' }
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: Nexus-Agent-Setup
-          path: release/*.exe
+          path: |
+            release/*.exe
+            release/latest.yml
           if-no-files-found: error
 
       - name: Publish release
@@ -58,5 +73,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $installer = (Get-ChildItem release/*.exe | Select-Object -First 1).FullName
-          gh release create $env:GITHUB_REF_NAME $installer --title "Nexus Agent $env:GITHUB_REF_NAME" --generate-notes
+          # 安装包、差分更新用的 blockmap，以及软件内更新要读的 latest.yml
+          $files = @(Get-ChildItem release/*.exe, release/*.exe.blockmap, release/latest.yml | ForEach-Object { $_.FullName })
+          if (-not (Test-Path release/latest.yml)) { throw 'latest.yml was not generated' }
+          gh release create $env:GITHUB_REF_NAME @files --title "Nexus Agent $env:GITHUB_REF_NAME" --generate-notes
